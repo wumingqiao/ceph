@@ -33,6 +33,7 @@
 #include "include/unordered_map.h"
 #include "include/memory.h"
 #include "include/mempool.h"
+#include "common/bloom_filter.hpp"
 #include "common/Finisher.h"
 #include "common/perf_counters.h"
 #include "compressor/Compressor.h"
@@ -45,6 +46,7 @@
 class Allocator;
 class FreelistManager;
 class BlueFS;
+class BlueStoreRepairer;
 
 //#define DEBUG_CACHE
 //#define DEBUG_DEFERRED
@@ -117,6 +119,7 @@ enum {
   l_bluestore_extent_compress,
   l_bluestore_gc_merged,
   l_bluestore_read_eio,
+  l_bluestore_fragmentation,
   l_bluestore_last
 };
 
@@ -129,6 +132,9 @@ public:
   const char** get_tracked_conf_keys() const override;
   void handle_conf_change(const struct md_config_t *conf,
                                   const std::set<std::string> &changed) override;
+
+  //handler for discard event
+  void handle_discard(interval_set<uint64_t>& to_release);
 
   void _set_csum();
   void _set_compression();
@@ -402,7 +408,7 @@ public:
 
     /// put logical references, and get back any released extents
     void put_ref(uint64_t offset, uint32_t length,
-		 PExtentVector *r, set<SharedBlob*> *maybe_unshared_blobs);
+		 PExtentVector *r, bool *unshare);
 
     friend bool operator==(const SharedBlob &l, const SharedBlob &r) {
       return l.get_sbid() == r.get_sbid();
@@ -431,7 +437,8 @@ public:
     SharedBlobRef lookup(uint64_t sbid) {
       std::lock_guard<std::mutex> l(lock);
       auto p = sb_map.find(sbid);
-      if (p == sb_map.end()) {
+      if (p == sb_map.end() ||
+	  p->second->nref == 0) {
         return nullptr;
       }
       return p->second;
@@ -443,14 +450,11 @@ public:
       sb->coll = coll;
     }
 
-    bool try_remove(SharedBlob *sb) {
+    void remove_last(SharedBlob *sb) {
       std::lock_guard<std::mutex> l(lock);
-      if (sb->nref == 0) {
-	assert(sb->get_parent() == this);
-	sb_map.erase(sb->get_sbid());
-	return true;
-      }
-      return false;
+      assert(sb->nref == 0);
+      assert(sb->get_parent() == this);
+      sb_map.erase(sb->get_sbid());
     }
 
     void remove(SharedBlob *sb) {
@@ -464,7 +468,8 @@ public:
       return sb_map.empty();
     }
 
-    void dump(CephContext *cct, int lvl);
+    template <int LogLevelV>
+    void dump(CephContext *cct);
   };
 
 //#define CACHE_BLOB_BL  // not sure if this is a win yet or not... :/
@@ -592,7 +597,7 @@ public:
     }
     void decode(
       Collection */*coll*/,
-      bufferptr::iterator& p,
+      bufferptr::const_iterator& p,
       bool include_ref_map) {
       const char *start = p.get_pos();
       denc(blob, p);
@@ -632,7 +637,7 @@ public:
     }
     void decode(
       Collection *coll,
-      bufferptr::iterator& p,
+      bufferptr::const_iterator& p,
       uint64_t struct_v,
       uint64_t* sbid,
       bool include_ref_map);
@@ -792,7 +797,7 @@ public:
 
     void bound_encode_spanning_blobs(size_t& p);
     void encode_spanning_blobs(bufferlist::contiguous_appender& p);
-    void decode_spanning_blobs(bufferptr::iterator& p);
+    void decode_spanning_blobs(bufferptr::const_iterator& p);
 
     BlobRef get_spanning_blob(int id) {
       auto p = spanning_blob_map.find(id);
@@ -1331,7 +1336,8 @@ public:
     void clear();
     bool empty();
 
-    void dump(CephContext *cct, int lvl);
+    template <int LogLevelV>
+    void dump(CephContext *cct);
 
     /// return true if f true for any item
     bool map_any(std::function<bool(OnodeRef)> f);
@@ -1457,6 +1463,14 @@ public:
     int64_t& compressed_allocated() {
       return values[STATFS_COMPRESSED_ALLOCATED];
     }
+    volatile_statfs& operator=(const store_statfs_t& st) {
+      values[STATFS_ALLOCATED] = st.allocated;
+      values[STATFS_STORED] = st.stored;
+      values[STATFS_COMPRESSED_ORIGINAL] = st.compressed_original;
+      values[STATFS_COMPRESSED] = st.compressed;
+      values[STATFS_COMPRESSED_ALLOCATED] = st.compressed_allocated;
+      return *this;
+    }
     bool is_empty() {
       return values[STATFS_ALLOCATED] == 0 &&
 	values[STATFS_STORED] == 0 &&
@@ -1464,7 +1478,7 @@ public:
 	values[STATFS_COMPRESSED_ORIGINAL] == 0 &&
 	values[STATFS_COMPRESSED_ALLOCATED] == 0;
     }
-    void decode(bufferlist::iterator& it) {
+    void decode(bufferlist::const_iterator& it) {
       using ceph::decode;
       for (size_t i = 0; i < STATFS_LAST; i++) {
 	decode(values[i], it);
@@ -1577,12 +1591,16 @@ public:
     uint64_t last_nid = 0;     ///< if non-zero, highest new nid we allocated
     uint64_t last_blobid = 0;  ///< if non-zero, highest new blobid we allocated
 
-    explicit TransContext(CephContext* cct, Collection *c, OpSequencer *o)
+    explicit TransContext(CephContext* cct, Collection *c, OpSequencer *o,
+			  list<Context*> *on_commits)
       : ch(c),
 	osr(o),
 	ioc(cct, this),
 	start(ceph_clock_now()) {
       last_stamp = start;
+      if (on_commits) {
+	oncommits.swap(*on_commits);
+      }
     }
     ~TransContext() {
       delete deferred_txn;
@@ -1798,7 +1816,8 @@ private:
   BlueFS *bluefs = nullptr;
   unsigned bluefs_shared_bdev = 0;  ///< which bluefs bdev we are sharing
   bool bluefs_single_shared_device = true;
-  utime_t bluefs_last_balance;
+  mono_time bluefs_last_balance;
+  utime_t next_dump_on_bluefs_balance_failure;
 
   KeyValueDB *db = nullptr;
   BlockDevice *bdev = nullptr;
@@ -1984,6 +2003,7 @@ private:
 
   void _open_statfs();
 
+  void _dump_alloc_on_rebalance_failure();
   int _reconcile_bluefs_freespace();
   int _balance_bluefs_freespace(PExtentVector *extents);
   void _commit_bluefs_freespace(const PExtentVector& extents);
@@ -1996,11 +2016,12 @@ private:
   void _assign_nid(TransContext *txc, OnodeRef o);
   uint64_t _assign_blobid(TransContext *txc);
 
-  void _dump_onode(const OnodeRef& o, int log_level=30);
-  void _dump_extent_map(ExtentMap& em, int log_level=30);
-  void _dump_transaction(Transaction *t, int log_level = 30);
+  template <int LogLevelV = 30> void _dump_onode(const OnodeRef& o);
+  template <int LogLevelV = 30> void _dump_extent_map(ExtentMap& em);
+  template <int LogLevelV = 30> void _dump_transaction(Transaction *t);
 
-  TransContext *_txc_create(Collection *c, OpSequencer *osr);
+  TransContext *_txc_create(Collection *c, OpSequencer *osr,
+			    list<Context*> *on_commits);
   void _txc_update_store_statfs(TransContext *txc);
   void _txc_add_transaction(TransContext *txc, Transaction *t);
   void _txc_calc_cost(TransContext *txc);
@@ -2044,11 +2065,13 @@ public:
 
 private:
   int _fsck_check_extents(
+    const coll_t& cid,
     const ghobject_t& oid,
     const PExtentVector& extents,
     bool compressed,
     mempool_dynamic_bitset &used_blocks,
     uint64_t granularity,
+    BlueStoreRepairer* repairer,
     store_statfs_t& expected_statfs);
 
   void _buffer_cache_write(
@@ -2079,6 +2102,8 @@ private:
   void _apply_padding(uint64_t head_pad,
 		      uint64_t tail_pad,
 		      bufferlist& padded);
+
+  void _record_onode(OnodeRef &o, KeyValueDB::Transaction &txn);
 
   // -- ondisk version ---
 public:
@@ -2330,6 +2355,17 @@ public:
     RWLock::WLocker l(debug_read_error_lock);
     debug_mdata_error_objects.insert(o);
   }
+
+  /// methods to inject various errors fsck can repair
+  void inject_broken_shared_blob_key(const string& key,
+			 const bufferlist& bl);
+  void inject_leaked(uint64_t len);
+  void inject_false_free(coll_t cid, ghobject_t oid);
+  void inject_statfs(const store_statfs_t& new_statfs);
+  void inject_misreference(coll_t cid1, ghobject_t oid1,
+			   coll_t cid2, ghobject_t oid2,
+			   uint64_t offset);
+
   void compact() override {
     assert(db);
     db->compact();
@@ -2632,5 +2668,188 @@ static inline void intrusive_ptr_add_ref(BlueStore::OpSequencer *o) {
 static inline void intrusive_ptr_release(BlueStore::OpSequencer *o) {
   o->put();
 }
+
+class BlueStoreRepairer
+{
+public:
+  // to simplify future potential migration to mempools
+  using fsck_interval = interval_set<uint64_t>;
+
+  // Structure to track what pextents are used for specific cid/oid.
+  // Similar to Bloom filter positive and false-positive matches are 
+  // possible only.
+  // Maintains two lists of bloom filters for both cids and oids
+  //   where each list entry is a BF for specific disk pextent
+  //   The length of the extent per filter is measured on init.
+  // Allows to filter out 'uninteresting' pextents to speadup subsequent
+  //  'is_used' access. 
+  struct StoreSpaceTracker {
+    const uint64_t BLOOM_FILTER_SALT_COUNT = 2;
+    const uint64_t BLOOM_FILTER_TABLE_SIZE = 32; // bytes per single filter
+    const uint64_t BLOOM_FILTER_EXPECTED_COUNT = 16; // arbitrary selected
+    static const uint64_t DEF_MEM_CAP = 128 * 1024 * 1024;
+
+    typedef mempool::bluestore_fsck::vector<bloom_filter> bloom_vector;
+    bloom_vector collections_bfs;
+    bloom_vector objects_bfs;
+    
+    bool was_filtered_out = false; 
+    uint64_t granularity = 0; // extent length for a single filter
+
+    StoreSpaceTracker() {
+    }
+    StoreSpaceTracker(const StoreSpaceTracker& from) :
+      collections_bfs(from.collections_bfs),
+      objects_bfs(from.objects_bfs),
+      granularity(from.granularity) {
+    }
+
+    void init(uint64_t total,
+	      uint64_t min_alloc_size,
+	      uint64_t mem_cap = DEF_MEM_CAP) {
+      assert(!granularity); // not initialized yet
+      assert(min_alloc_size && isp2(min_alloc_size));
+      assert(mem_cap);
+      
+      total = round_up_to(total, min_alloc_size);
+      granularity = total * BLOOM_FILTER_TABLE_SIZE * 2 / mem_cap;
+
+      if (!granularity) {
+	granularity = min_alloc_size;
+      } else {
+	granularity = round_up_to(granularity, min_alloc_size);
+      }
+
+      uint64_t entries = p2roundup(total, granularity) / granularity;
+      collections_bfs.resize(entries,
+        bloom_filter(BLOOM_FILTER_SALT_COUNT,
+                     BLOOM_FILTER_TABLE_SIZE,
+                     0,
+                     BLOOM_FILTER_EXPECTED_COUNT));
+      objects_bfs.resize(entries, 
+        bloom_filter(BLOOM_FILTER_SALT_COUNT,
+                     BLOOM_FILTER_TABLE_SIZE,
+                     0,
+                     BLOOM_FILTER_EXPECTED_COUNT));
+    }
+    inline uint32_t get_hash(const coll_t& cid) const {
+      return cid.hash_to_shard(1);
+    }
+    inline void set_used(uint64_t offset, uint64_t len,
+			 const coll_t& cid, const ghobject_t& oid) {
+      assert(granularity); // initialized
+      
+      // can't call this func after filter_out has been apllied
+      assert(!was_filtered_out);
+      if (!len) {
+	return;
+      }
+      auto pos = offset / granularity;
+      auto end_pos = (offset + len - 1) / granularity;
+      while (pos <= end_pos) {
+        collections_bfs[pos].insert(get_hash(cid));
+        objects_bfs[pos].insert(oid.hobj.get_hash());
+        ++pos;
+      }
+    }
+    // filter-out entries unrelated to the specified(broken) extents.
+    // 'is_used' calls are permitted after that only
+    size_t filter_out(const fsck_interval& extents);
+
+    // determines if collection's present after filtering-out 
+    inline bool is_used(const coll_t& cid) const {
+      assert(was_filtered_out);
+      for(auto& bf : collections_bfs) {
+        if (bf.contains(get_hash(cid))) {
+          return true;
+        }
+      }
+      return false;
+    }
+    // determines if object's present after filtering-out 
+    inline bool is_used(const ghobject_t& oid) const {
+      assert(was_filtered_out);
+      for(auto& bf : objects_bfs) {
+        if (bf.contains(oid.hobj.get_hash())) {
+          return true;
+        }
+      }
+      return false;
+    }
+    // determines if collection's present before filtering-out 
+    inline bool is_used(const coll_t& cid, uint64_t offs) const {
+      assert(granularity); // initialized
+      assert(!was_filtered_out);
+      auto &bf = collections_bfs[offs / granularity];
+      if (bf.contains(get_hash(cid))) {
+        return true;
+      }
+      return false;
+    }
+    // determines if object's present before filtering-out 
+    inline bool is_used(const ghobject_t& oid, uint64_t offs) const {
+      assert(granularity); // initialized
+      assert(!was_filtered_out);
+      auto &bf = objects_bfs[offs / granularity];
+      if (bf.contains(oid.hobj.get_hash())) {
+        return true;
+      }
+      return false;
+    }
+  };
+public:
+
+  bool remove_key(KeyValueDB *db, const string& prefix, const string& key);
+  bool fix_shared_blob(KeyValueDB *db,
+		         uint64_t sbid,
+		       const bufferlist* bl);
+  bool fix_statfs(KeyValueDB *db, const store_statfs_t& new_statfs);
+
+  bool fix_leaked(KeyValueDB *db,
+		  FreelistManager* fm,
+		  uint64_t offset, uint64_t len);
+  bool fix_false_free(KeyValueDB *db,
+		      FreelistManager* fm,
+		      uint64_t offset, uint64_t len);
+
+  void init(uint64_t total_space, uint64_t lres_tracking_unit_size);
+
+  bool preprocess_misreference(KeyValueDB *db);
+
+  unsigned apply(KeyValueDB* db);
+
+  void note_misreference(uint64_t offs, uint64_t len, bool inc_error) {
+    misreferenced_extents.union_insert(offs, len);
+    if (inc_error) {
+      ++to_repair_cnt;
+    }
+  }
+
+  StoreSpaceTracker& get_space_usage_tracker() {
+    return space_usage_tracker;
+  }
+  const fsck_interval& get_misreferences() const {
+    return misreferenced_extents;
+  }
+  KeyValueDB::Transaction get_fix_misreferences_txn() {
+    return fix_misreferences_txn;
+  }
+
+private:
+  unsigned to_repair_cnt = 0;
+  KeyValueDB::Transaction fix_fm_leaked_txn;
+  KeyValueDB::Transaction fix_fm_false_free_txn;
+  KeyValueDB::Transaction remove_key_txn;
+  KeyValueDB::Transaction fix_statfs_txn;
+  KeyValueDB::Transaction fix_shared_blob_txn;
+
+  KeyValueDB::Transaction fix_misreferences_txn;
+
+  StoreSpaceTracker space_usage_tracker;
+
+  // non-shared extents with multiple references
+  fsck_interval misreferenced_extents;
+
+};
 
 #endif

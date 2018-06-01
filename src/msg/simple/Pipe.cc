@@ -405,7 +405,7 @@ int Pipe::accept()
     goto fail_unlocked;
   }
   try {
-    bufferlist::iterator ti = addrbl.begin();
+    auto ti = addrbl.cbegin();
     decode(peer_addr, ti);
   } catch (const buffer::error& e) {
     ldout(msgr->cct,2) << __func__ <<  " decode peer_addr failed: " << e.what()
@@ -1071,7 +1071,7 @@ int Pipe::connect()
     goto fail;
   }
   try {
-    bufferlist::iterator p = addrbl.begin();
+    auto p = addrbl.cbegin();
     decode(paddr, p);
     decode(peer_addr_for_me, p);
   }
@@ -1186,7 +1186,7 @@ int Pipe::connect()
     }
 
     if (authorizer) {
-      bufferlist::iterator iter = authorizer_reply.begin();
+      auto iter = authorizer_reply.cbegin();
       if (!authorizer->verify_reply(iter)) {
         ldout(msgr->cct,0) << "failed verifying authorize reply" << dendl;
 	goto fail;
@@ -1411,8 +1411,10 @@ void Pipe::requeue_sent()
 void Pipe::discard_requeued_up_to(uint64_t seq)
 {
   ldout(msgr->cct, 10) << "discard_requeued_up_to " << seq << dendl;
-  if (out_q.count(CEPH_MSG_PRIO_HIGHEST) == 0)
+  if (out_q.count(CEPH_MSG_PRIO_HIGHEST) == 0) {
+    out_seq = seq;
     return;
+  }
   list<Message*>& rq = out_q[CEPH_MSG_PRIO_HIGHEST];
   while (!rq.empty()) {
     Message *m = rq.front();

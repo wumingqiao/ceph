@@ -163,10 +163,7 @@ void JSONFormatter::print_comma(json_formatter_stack_entry_d& entry)
 
 void JSONFormatter::print_quoted_string(std::string_view s)
 {
-  int len = escape_json_attr_len(s.data(), s.size());
-  char escaped[len];
-  escape_json_attr(s.data(), s.size(), escaped);
-  m_ss << '\"' << escaped << '\"';
+  m_ss << '\"' << json_stream_escaper(s) << '\"';
 }
 
 void JSONFormatter::print_name(const char *name)
@@ -349,7 +346,7 @@ void XMLFormatter::output_header()
 {
   if(!m_header_done) {
     m_header_done = true;
-    write_raw_data(XMLFormatter::XML_1_DTD);;
+    write_raw_data(XMLFormatter::XML_1_DTD);
     if (m_pretty)
       m_ss << "\n";
   }
@@ -450,7 +447,7 @@ void XMLFormatter::dump_string(const char *name, std::string_view s)
       [this](char c) { return this->to_lower_underscore(c); });
 
   print_spaces();
-  m_ss << "<" << e << ">" << escape_xml_str(s.data()) << "</" << e << ">";
+  m_ss << "<" << e << ">" << xml_stream_escaper(s) << "</" << e << ">";
   if (m_pretty)
     m_ss << "\n";
 }
@@ -464,7 +461,7 @@ void XMLFormatter::dump_string_with_attrs(const char *name, std::string_view s, 
   std::string attrs_str;
   get_attrs_str(&attrs, attrs_str);
   print_spaces();
-  m_ss << "<" << e << attrs_str << ">" << escape_xml_str(s.data()) << "</" << e << ">";
+  m_ss << "<" << e << attrs_str << ">" << xml_stream_escaper(s) << "</" << e << ">";
   if (m_pretty)
     m_ss << "\n";
 }
@@ -480,7 +477,7 @@ std::ostream& XMLFormatter::dump_stream(const char *name)
 void XMLFormatter::dump_format_va(const char* name, const char *ns, bool quoted, const char *fmt, va_list ap)
 {
   char buf[LARGE_SIZE];
-  vsnprintf(buf, LARGE_SIZE, fmt, ap);
+  size_t len = vsnprintf(buf, LARGE_SIZE, fmt, ap);
   std::string e(name);
   std::transform(e.begin(), e.end(), e.begin(),
       [this](char c) { return this->to_lower_underscore(c); });
@@ -489,7 +486,7 @@ void XMLFormatter::dump_format_va(const char* name, const char *ns, bool quoted,
   if (ns) {
     m_ss << "<" << e << " xmlns=\"" << ns << "\">" << buf << "</" << e << ">";
   } else {
-    m_ss << "<" << e << ">" << escape_xml_str(buf) << "</" << e << ">";
+    m_ss << "<" << e << ">" << xml_stream_escaper(std::string_view(buf, len)) << "</" << e << ">";
   }
 
   if (m_pretty)
@@ -545,7 +542,7 @@ void XMLFormatter::open_section_in_ns(const char *name, const char *ns, const Fo
 void XMLFormatter::finish_pending_string()
 {
   if (!m_pending_string_name.empty()) {
-    m_ss << escape_xml_str(m_pending_string.str().c_str())
+    m_ss << xml_stream_escaper(m_pending_string.str())
       << "</" << m_pending_string_name << ">";
     m_pending_string_name.clear();
     m_pending_string.str(std::string());
@@ -562,14 +559,6 @@ void XMLFormatter::print_spaces()
     std::string spaces(m_sections.size(), ' ');
     m_ss << spaces;
   }
-}
-
-std::string XMLFormatter::escape_xml_str(std::string_view str)
-{
-  size_t len = escape_xml_attr_len(str.data());
-  std::vector<char> escaped(len, '\0');
-  escape_xml_attr(str.data(), &escaped[0]);
-  return std::string(&escaped[0]);
 }
 
 char XMLFormatter::to_lower_underscore(char c) const

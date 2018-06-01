@@ -29,7 +29,7 @@
 #include "MDSMap.h"
 #include "MDSRank.h"
 
-#define CEPH_MDS_PROTOCOL    31 /* cluster internal */
+#define CEPH_MDS_PROTOCOL    33 /* cluster internal */
 
 class AuthAuthorizeHandlerRegistry;
 class Message;
@@ -46,6 +46,15 @@ class MDSDaemon : public Dispatcher, public md_config_obs_t {
   bool         stopping;
 
   SafeTimer    timer;
+
+
+  mono_time get_starttime() const {
+    return starttime;
+  }
+  chrono::duration<double> get_uptime() const {
+    mono_time now = mono_clock::now();
+    return chrono::duration<double>(now-starttime);
+  }
 
  protected:
   Beacon  beacon;
@@ -113,8 +122,8 @@ class MDSDaemon : public Dispatcher, public md_config_obs_t {
   void set_up_admin_socket();
   void clean_up_admin_socket();
   void check_ops_in_flight(); // send off any slow ops to monitor
-  bool asok_command(string command, cmdmap_t& cmdmap, string format,
-		    ostream& ss);
+  bool asok_command(std::string_view command, const cmdmap_t& cmdmap,
+		    std::string_view format, ostream& ss);
 
   void dump_status(Formatter *f);
 
@@ -154,6 +163,9 @@ protected:
   void handle_command(class MCommand *m);
   void handle_mds_map(class MMDSMap *m);
   void _handle_mds_map(MDSMap *oldmap);
+
+private:
+    mono_time starttime = mono_clock::zero();
 };
 
 

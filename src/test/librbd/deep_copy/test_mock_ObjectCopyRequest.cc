@@ -9,7 +9,9 @@
 #include "librbd/ImageState.h"
 #include "librbd/internal.h"
 #include "librbd/Operations.h"
+#include "librbd/api/Image.h"
 #include "librbd/deep_copy/ObjectCopyRequest.h"
+#include "librbd/io/ImageRequest.h"
 #include "librbd/io/ImageRequestWQ.h"
 #include "librbd/io/ReadResult.h"
 #include "test/librados_test_stub/MockTestMemIoCtxImpl.h"
@@ -20,12 +22,40 @@ namespace librbd {
 namespace {
 
 struct MockTestImageCtx : public librbd::MockImageCtx {
-  MockTestImageCtx(librbd::ImageCtx &image_ctx)
+  explicit MockTestImageCtx(librbd::ImageCtx &image_ctx)
     : librbd::MockImageCtx(image_ctx) {
   }
 };
 
 } // anonymous namespace
+
+namespace util {
+
+inline ImageCtx* get_image_ctx(MockTestImageCtx* image_ctx) {
+  return image_ctx->image_ctx;
+}
+
+} // namespace util
+
+namespace io {
+
+template <>
+struct ImageRequest<MockTestImageCtx> {
+  static ImageRequest *s_instance;
+
+  static void aio_read(MockTestImageCtx *ictx, AioCompletion *c,
+                       Extents &&image_extents, ReadResult &&read_result,
+                       int op_flags, const ZTracer::Trace &parent_trace) {
+    assert(s_instance != nullptr);
+    s_instance->aio_read(c, image_extents);
+  }
+  MOCK_METHOD2(aio_read, void(AioCompletion *, const Extents&));
+};
+
+ImageRequest<MockTestImageCtx> *ImageRequest<MockTestImageCtx>::s_instance = nullptr;
+
+} // namespace io
+
 } // namespace librbd
 
 // template definitions
@@ -168,8 +198,9 @@ public:
       librbd::MockTestImageCtx &mock_src_image_ctx,
       librbd::MockTestImageCtx &mock_dst_image_ctx, Context *on_finish) {
     expect_get_object_name(mock_dst_image_ctx);
-    return new MockObjectCopyRequest(&mock_src_image_ctx, &mock_dst_image_ctx,
-                                     m_snap_map, 0, on_finish);
+    return new MockObjectCopyRequest(&mock_src_image_ctx, nullptr,
+                                     &mock_dst_image_ctx, m_snap_map, 0, false,
+                                     on_finish);
   }
 
   void expect_set_snap_read(librados::MockTestMemIoCtxImpl &mock_io_ctx,
@@ -350,16 +381,16 @@ public:
       std::cout << "comparing '" << snap_name << " (" << src_snap_id
                 << " to " << dst_snap_id << ")" << std::endl;
 
-      r = librbd::snap_set(m_src_image_ctx,
-			   cls::rbd::UserSnapshotNamespace(),
-			   snap_name.c_str());
+      r = librbd::api::Image<>::snap_set(m_src_image_ctx,
+			                 cls::rbd::UserSnapshotNamespace(),
+			                 snap_name.c_str());
       if (r < 0) {
         return r;
       }
 
-      r = librbd::snap_set(m_dst_image_ctx,
-			   cls::rbd::UserSnapshotNamespace(),
-			   snap_name.c_str());
+      r = librbd::api::Image<>::snap_set(m_dst_image_ctx,
+			                 cls::rbd::UserSnapshotNamespace(),
+			                 snap_name.c_str());
       if (r < 0) {
         return r;
       }
@@ -385,15 +416,15 @@ public:
       }
     }
 
-    r = librbd::snap_set(m_src_image_ctx,
-			 cls::rbd::UserSnapshotNamespace(),
-			 nullptr);
+    r = librbd::api::Image<>::snap_set(m_src_image_ctx,
+			               cls::rbd::UserSnapshotNamespace(),
+			               nullptr);
     if (r < 0) {
       return r;
     }
-    r = librbd::snap_set(m_dst_image_ctx,
-			 cls::rbd::UserSnapshotNamespace(),
-			 nullptr);
+    r = librbd::api::Image<>::snap_set(m_dst_image_ctx,
+			               cls::rbd::UserSnapshotNamespace(),
+			               nullptr);
     if (r < 0) {
       return r;
     }

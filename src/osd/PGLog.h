@@ -34,13 +34,11 @@ constexpr auto PGLOG_INDEXED_ALL              = PGLOG_INDEXED_OBJECTS
 class CephContext;
 
 struct PGLog : DoutPrefixProvider {
-  DoutPrefixProvider *prefix_provider;
-  string gen_prefix() const override {
-    return prefix_provider ? prefix_provider->gen_prefix() : "";
+  std::ostream& gen_prefix(std::ostream& out) const override {
+    return out;
   }
   unsigned get_subsys() const override {
-    return prefix_provider ? prefix_provider->get_subsys() :
-      (unsigned)ceph_subsys_osd;
+    return static_cast<unsigned>(ceph_subsys_osd);
   }
   CephContext *get_cct() const override {
     return cct;
@@ -138,7 +136,7 @@ public:
     { }
 
     template <typename... Args>
-    IndexedLog(Args&&... args) :
+    explicit IndexedLog(Args&&... args) :
       pg_log_t(std::forward<Args>(args)...),
       complete_to(log.end()),
       last_requested(0),
@@ -646,8 +644,7 @@ protected:
 public:
 
   // cppcheck-suppress noExplicitConstructor
-  PGLog(CephContext *cct, DoutPrefixProvider *dpp = nullptr) :
-    prefix_provider(dpp),
+  PGLog(CephContext *cct) :
     dirty_from(eversion_t::max()),
     writeout_from(eversion_t::max()),
     dirty_from_dups(eversion_t::max()),
@@ -666,8 +663,12 @@ public:
 
   const pg_missing_tracker_t& get_missing() const { return missing; }
 
-  void missing_add(const hobject_t& oid, eversion_t need, eversion_t have) {
-    missing.add(oid, need, have, false);
+  void missing_add(const hobject_t& oid, eversion_t need, eversion_t have, bool is_delete=false) {
+    missing.add(oid, need, have, is_delete);
+  }
+
+  void missing_add_next_entry(const pg_log_entry_t& e) {
+    missing.add_next_event(e);
   }
 
   //////////////////// get or set log ////////////////////
@@ -771,21 +772,21 @@ public:
 
   void reset_complete_to(pg_info_t *info) {
     log.complete_to = log.log.begin();
+    assert(log.complete_to != log.log.end());
     auto oldest_need = missing.get_oldest_need();
     if (oldest_need != eversion_t()) {
       while (log.complete_to->version < oldest_need) {
-        assert(log.complete_to != log.log.end());
         ++log.complete_to;
+        assert(log.complete_to != log.log.end());
       }
     }
-    assert(log.complete_to != log.log.end());
+    if (!info)
+      return;
     if (log.complete_to == log.log.begin()) {
-      if (info)
-	info->last_complete = eversion_t();
+      info->last_complete = eversion_t();
     } else {
       --log.complete_to;
-      if (info)
-	info->last_complete = log.complete_to->version;
+      info->last_complete = log.complete_to->version;
       ++log.complete_to;
     }
   }
@@ -1308,7 +1309,7 @@ public:
 	if (p->key()[0] == '_')
 	  continue;
 	bufferlist bl = p->value();//Copy bufferlist before creating iterator
-	bufferlist::iterator bp = bl.begin();
+	auto bp = bl.cbegin();
 	if (p->key() == "divergent_priors") {
 	  decode(divergent_priors, bp);
 	  ldpp_dout(dpp, 20) << "read_log_and_missing " << divergent_priors.size()
@@ -1447,7 +1448,7 @@ public:
 	      bv);
 	    if (r >= 0) {
 	      object_info_t oi(bv);
-	      assert(oi.version == i.second.have);
+	      assert(oi.version == i.second.have || eversion_t() == i.second.have);
 	    } else {
 	      assert(i.second.is_delete() || eversion_t() == i.second.have);
 	    }

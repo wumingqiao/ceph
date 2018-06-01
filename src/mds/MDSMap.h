@@ -62,10 +62,6 @@
 class CephContext;
 class health_check_map_t;
 
-extern CompatSet get_mdsmap_compat_set_all();
-extern CompatSet get_mdsmap_compat_set_default();
-extern CompatSet get_mdsmap_compat_set_base(); // pre v0.20
-
 #define MDS_FEATURE_INCOMPAT_BASE CompatSet::Feature(1, "base v0.20")
 #define MDS_FEATURE_INCOMPAT_CLIENTRANGES CompatSet::Feature(2, "client writeable ranges")
 #define MDS_FEATURE_INCOMPAT_FILELAYOUT CompatSet::Feature(3, "default file layouts on dirs")
@@ -75,6 +71,7 @@ extern CompatSet get_mdsmap_compat_set_base(); // pre v0.20
 #define MDS_FEATURE_INCOMPAT_INLINE CompatSet::Feature(7, "mds uses inline data")
 #define MDS_FEATURE_INCOMPAT_NOANCHOR CompatSet::Feature(8, "no anchor table")
 #define MDS_FEATURE_INCOMPAT_FILE_LAYOUT_V2 CompatSet::Feature(9, "file layout v2")
+#define MDS_FEATURE_INCOMPAT_SNAPREALM_V2 CompatSet::Feature(10, "snaprealm v2")
 
 #define MDS_FS_NAME_DEFAULT "cephfs"
 
@@ -154,7 +151,7 @@ public:
       if ((features & CEPH_FEATURE_MDSENC) == 0 ) encode_unversioned(bl);
       else encode_versioned(bl, features);
     }
-    void decode(bufferlist::iterator& p);
+    void decode(bufferlist::const_iterator& p);
     void dump(Formatter *f) const;
     void print_summary(ostream &out) const;
 
@@ -167,28 +164,32 @@ public:
     void encode_unversioned(bufferlist& bl) const;
   };
 
+  static CompatSet get_compat_set_all();
+  static CompatSet get_compat_set_default();
+  static CompatSet get_compat_set_base(); // pre v0.20
 
 protected:
   // base map
-  epoch_t epoch;
-  bool enabled;
-  std::string fs_name;
-  uint32_t flags;        // flags
-  epoch_t last_failure;  // mds epoch of last failure
-  epoch_t last_failure_osd_epoch; // osd epoch of last failure; any mds entering replay needs
+  epoch_t epoch = 0;
+  bool enabled = false;
+  std::string fs_name = MDS_FS_NAME_DEFAULT;
+  uint32_t flags = CEPH_MDSMAP_DEFAULTS; // flags
+  epoch_t last_failure = 0;  // mds epoch of last failure
+  epoch_t last_failure_osd_epoch = 0; // osd epoch of last failure; any mds entering replay needs
                                   // at least this osdmap to ensure the blacklist propagates.
-  utime_t created, modified;
+  utime_t created;
+  utime_t modified;
 
-  mds_rank_t tableserver;   // which MDS has snaptable
-  mds_rank_t root;          // which MDS has root directory
+  mds_rank_t tableserver = 0;   // which MDS has snaptable
+  mds_rank_t root = 0;          // which MDS has root directory
 
-  __u32 session_timeout;
-  __u32 session_autoclose;
-  uint64_t max_file_size;
+  __u32 session_timeout = 60;
+  __u32 session_autoclose = 300;
+  uint64_t max_file_size = 1ULL<<40; /* 1TB */
 
   std::vector<int64_t> data_pools;  // file data pools available to clients (via an ioctl).  first is the default.
-  int64_t cas_pool;            // where CAS objects go
-  int64_t metadata_pool;       // where fs metadata objects go
+  int64_t cas_pool = -1;            // where CAS objects go
+  int64_t metadata_pool = -1;       // where fs metadata objects go
   
   /*
    * in: the set of logical mds #'s that define the cluster.  this is the set
@@ -200,8 +201,9 @@ protected:
    *    @up + @failed = @in.  @in * @stopped = {}.
    */
 
-  mds_rank_t max_mds; /* The maximum number of active MDSes. Also, the maximum rank. */
-  mds_rank_t standby_count_wanted;
+  mds_rank_t max_mds = 1; /* The maximum number of active MDSes. Also, the maximum rank. */
+  mds_rank_t old_max_mds = 0; /* Value to restore when MDS cluster is marked up */
+  mds_rank_t standby_count_wanted = -1;
   string balancer;    /* The name/version of the mantle balancer (i.e. the rados obj name) */
 
   std::set<mds_rank_t> in;              // currently defined cluster
@@ -211,12 +213,12 @@ protected:
   std::map<mds_rank_t, mds_gid_t> up;        // who is in those roles
   std::map<mds_gid_t, mds_info_t> mds_info;
 
-  uint8_t ever_allowed_features; //< bitmap of features the cluster has allowed
-  uint8_t explicitly_allowed_features; //< bitmap of features explicitly enabled 
+  uint8_t ever_allowed_features = 0; //< bitmap of features the cluster has allowed
+  uint8_t explicitly_allowed_features = 0; //< bitmap of features explicitly enabled
 
-  bool inline_data_enabled;
+  bool inline_data_enabled = false;
 
-  uint64_t cached_up_features;
+  uint64_t cached_up_features = 0;
 
 public:
   CompatSet compat;
@@ -226,24 +228,6 @@ public:
   friend class FSMap;
 
 public:
-  MDSMap() 
-    : epoch(0), enabled(false), fs_name(MDS_FS_NAME_DEFAULT),
-      flags(CEPH_MDSMAP_DEFAULTS), last_failure(0),
-      last_failure_osd_epoch(0),
-      tableserver(0), root(0),
-      session_timeout(60),
-      session_autoclose(300),
-      max_file_size(1ULL<<40), /* 1TB */
-      cas_pool(-1),
-      metadata_pool(-1),
-      max_mds(1),
-      standby_count_wanted(-1),
-      ever_allowed_features(0),
-      explicitly_allowed_features(0),
-      inline_data_enabled(false),
-      cached_up_features(0)
-  { }
-
   bool get_inline_data_enabled() const { return inline_data_enabled; }
   void set_inline_data_enabled(bool enabled) { inline_data_enabled = enabled; }
 
@@ -278,22 +262,15 @@ public:
   }
   void clear_snaps_allowed() { clear_flag(CEPH_MDSMAP_ALLOW_SNAPS); }
   bool allows_snaps() const { return test_flag(CEPH_MDSMAP_ALLOW_SNAPS); }
+  bool was_snaps_ever_allowed() const { return ever_allowed_features & CEPH_MDSMAP_ALLOW_SNAPS; }
 
-  void set_multimds_allowed() {
-    set_flag(CEPH_MDSMAP_ALLOW_MULTIMDS);
-    ever_allowed_features |= CEPH_MDSMAP_ALLOW_MULTIMDS;
-    explicitly_allowed_features |= CEPH_MDSMAP_ALLOW_MULTIMDS;
+  void set_multimds_snaps_allowed() {
+    set_flag(CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS);
+    ever_allowed_features |= CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS;
+    explicitly_allowed_features |= CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS;
   }
-  void clear_multimds_allowed() { clear_flag(CEPH_MDSMAP_ALLOW_MULTIMDS); }
-  bool allows_multimds() const { return test_flag(CEPH_MDSMAP_ALLOW_MULTIMDS); }
-
-  void set_dirfrags_allowed() {
-    set_flag(CEPH_MDSMAP_ALLOW_DIRFRAGS);
-    ever_allowed_features |= CEPH_MDSMAP_ALLOW_DIRFRAGS;
-    explicitly_allowed_features |= CEPH_MDSMAP_ALLOW_DIRFRAGS;
-  }
-  void clear_dirfrags_allowed() { clear_flag(CEPH_MDSMAP_ALLOW_DIRFRAGS); }
-  bool allows_dirfrags() const { return test_flag(CEPH_MDSMAP_ALLOW_DIRFRAGS); }
+  void clear_multimds_snaps_allowed() { clear_flag(CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS); }
+  bool allows_multimds_snaps() const { return test_flag(CEPH_MDSMAP_ALLOW_MULTIMDS_SNAPS); }
 
   epoch_t get_epoch() const { return epoch; }
   void inc_epoch() { epoch++; }
@@ -310,6 +287,8 @@ public:
 
   mds_rank_t get_max_mds() const { return max_mds; }
   void set_max_mds(mds_rank_t m) { max_mds = m; }
+  void set_old_max_mds() { old_max_mds = max_mds; }
+  mds_rank_t get_old_max_mds() const { return old_max_mds; }
 
   mds_rank_t get_standby_count_wanted(mds_rank_t standby_daemon_count) const {
     assert(standby_daemon_count >= 0);
@@ -508,6 +487,17 @@ public:
    */
   availability_t is_cluster_available() const;
 
+  /**
+   * Return whether this MDSMap is suitable for resizing based on the state
+   * of the ranks.
+   */
+  bool is_resizeable() const {
+    return !is_degraded() &&
+        get_num_mds(CEPH_MDS_STATE_CREATING) == 0 &&
+        get_num_mds(CEPH_MDS_STATE_STARTING) == 0 &&
+        get_num_mds(CEPH_MDS_STATE_STOPPING) == 0;
+  }
+
   // mds states
   bool is_down(mds_rank_t m) const { return up.count(m) == 0; }
   bool is_up(mds_rank_t m) const { return up.count(m); }
@@ -666,9 +656,9 @@ public:
     return -1;
   }
   void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& p);
+  void decode(bufferlist::const_iterator& p);
   void decode(bufferlist& bl) {
-    bufferlist::iterator p = bl.begin();
+    auto p = bl.cbegin();
     decode(p);
   }
   void sanitize(const std::function<bool(int64_t pool)>& pool_exists);

@@ -170,7 +170,7 @@ int destroy_collections(
     ghobject_t pgmeta_oid(coll.pg.make_pgmeta_oid());
     t.remove(coll.cid, pgmeta_oid);
     t.remove_collection(coll.cid);
-    int r = os->apply_transaction(coll.ch, std::move(t));
+    int r = os->queue_transaction(coll.ch, std::move(t));
     if (r && !failed) {
       derr << "Engine cleanup failed with " << cpp_strerror(-r) << dendl;
       failed = true;
@@ -204,7 +204,7 @@ int init_collections(std::unique_ptr<ObjectStore>& os,
       ObjectStore::Transaction t;
       t.create_collection(cid, split_bits);
       t.write(cid, OSD_SUPERBLOCK_GOBJECT, 0, bl.length(), bl);
-      int r = os->apply_transaction(ch, std::move(t));
+      int r = os->queue_transaction(ch, std::move(t));
 
       if (r < 0) {
 	derr << "Failure to write OSD superblock: " << cpp_strerror(-r) << dendl;
@@ -230,7 +230,7 @@ int init_collections(std::unique_ptr<ObjectStore>& os,
       t.create_collection(coll.cid, split_bits);
       ghobject_t pgmeta_oid(coll.pg.make_pgmeta_oid());
       t.touch(coll.cid, pgmeta_oid);
-      int r = os->apply_transaction(coll.ch, std::move(t));
+      int r = os->queue_transaction(coll.ch, std::move(t));
       if (r) {
 	derr << "Engine init failed with " << cpp_strerror(-r) << dendl;
 	destroy_collections(os, collections);
@@ -254,7 +254,7 @@ struct Engine {
   int ref_count;
   const bool unlink; //< unlink objects on destruction
 
-  Engine(thread_data* td);
+  explicit Engine(thread_data* td);
   ~Engine();
 
   static Engine* get_instance(thread_data* td) {
@@ -316,7 +316,8 @@ Engine::Engine(thread_data* td)
 
   // claim the g_ceph_context reference and release it on destruction
   cct = global_init(nullptr, args, CEPH_ENTITY_TYPE_OSD,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+		    CODE_ENVIRONMENT_UTILITY,
+		    CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
 
   // create the ObjectStore
@@ -437,7 +438,7 @@ Job::Job(Engine* engine, const thread_data* td)
     auto& oid = objects.back().oid;
     t.touch(coll.cid, oid);
     t.truncate(coll.cid, oid, file_size);
-    int r = engine->os->apply_transaction(coll.ch, std::move(t));
+    int r = engine->os->queue_transaction(coll.ch, std::move(t));
     if (r) {
       engine->deref();
       throw std::system_error(r, std::system_category(), "job init");
@@ -453,7 +454,7 @@ Job::~Job()
     // remove our objects
     for (auto& obj : objects) {
       t.remove(obj.coll.cid, obj.oid);
-      int r = engine->os->apply_transaction(obj.coll.ch, std::move(t));
+      int r = engine->os->queue_transaction(obj.coll.ch, std::move(t));
       if (r && !failed) {
 	derr << "job cleanup failed with " << cpp_strerror(-r) << dendl;
 	failed = true;
@@ -503,8 +504,8 @@ int fio_ceph_os_getevents(thread_data* td, unsigned int min,
 {
   auto job = static_cast<Job*>(td->io_ops_data);
   unsigned int events = 0;
-  io_u* u;
-  unsigned int i;
+  io_u* u = NULL;
+  unsigned int i = 0;
 
   // loop through inflight ios until we find 'min' completions
   do {
@@ -530,14 +531,14 @@ int fio_ceph_os_getevents(thread_data* td, unsigned int min,
 class UnitComplete : public Context {
   io_u* u;
  public:
-  UnitComplete(io_u* u) : u(u) {}
+  explicit UnitComplete(io_u* u) : u(u) {}
   void finish(int r) {
     // mark the pointer to indicate completion for fio_ceph_os_getevents()
     u->engine_data = reinterpret_cast<void*>(1ull);
   }
 };
 
-int fio_ceph_os_queue(thread_data* td, io_u* u)
+enum fio_q_status fio_ceph_os_queue(thread_data* td, io_u* u)
 {
   fio_ro_check(td, u);
 
@@ -667,10 +668,9 @@ int fio_ceph_os_queue(thread_data* td, io_u* u)
       ghobject_t pgmeta_oid(coll.pg.make_pgmeta_oid());
       t.omap_setkeys(coll.cid, pgmeta_oid, omaps);
     }
+    t.register_on_commit(new UnitComplete(u));
     os->queue_transaction(coll.ch,
-                          std::move(t),
-                          nullptr,
-                          new UnitComplete(u));
+                          std::move(t));
     return FIO_Q_QUEUED;
   }
 

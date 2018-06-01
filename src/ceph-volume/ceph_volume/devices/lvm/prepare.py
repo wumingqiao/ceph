@@ -6,6 +6,7 @@ from textwrap import dedent
 from ceph_volume.util import prepare as prepare_utils
 from ceph_volume.util import encryption as encryption_utils
 from ceph_volume.util import system, disk
+from ceph_volume.util.arg_validators import exclude_group_options
 from ceph_volume import conf, decorators, terminal
 from ceph_volume.api import lvm as api
 from .common import prepare_parser, rollback_osd
@@ -55,18 +56,20 @@ def prepare_filestore(device, journal, secrets, tags, osd_id, fsid):
         device = prepare_dmcrypt(key, device, 'data', tags)
         journal = prepare_dmcrypt(key, journal, 'journal', tags)
 
+    # vdo detection
+    is_vdo = api.is_vdo(device)
     # create the directory
     prepare_utils.create_osd_path(osd_id)
     # format the device
     prepare_utils.format_device(device)
     # mount the data device
-    prepare_utils.mount_osd(device, osd_id)
+    prepare_utils.mount_osd(device, osd_id, is_vdo=is_vdo)
     # symlink the journal
     prepare_utils.link_journal(journal, osd_id)
     # get the latest monmap
     prepare_utils.get_monmap(osd_id)
     # prepare the osd filesystem
-    prepare_utils.osd_mkfs_filestore(osd_id, fsid)
+    prepare_utils.osd_mkfs_filestore(osd_id, fsid, cephx_secret)
     # write the OSD keyring if it doesn't exist already
     prepare_utils.write_keyring(osd_id, cephx_secret)
     if secrets.get('dmcrypt_key'):
@@ -159,6 +162,7 @@ class Prepare(object):
         if device_name is None:
             return '', '', tags
         tags['ceph.type'] = device_type
+        tags['ceph.vdo'] = api.is_vdo(device_name)
         lv = self.get_lv(device_name)
         if lv:
             uuid = lv.lv_uuid
@@ -188,11 +192,7 @@ class Prepare(object):
         """
         if disk.is_partition(arg) or disk.is_device(arg):
             # we must create a vg, and then a single lv
-            vg_name = "ceph-%s" % cluster_fsid
-            if api.get_vg(vg_name=vg_name):
-                # means we already have a group for this, make a different one
-                # XXX this could end up being annoying for an operator, maybe?
-                vg_name = "ceph-%s" % str(uuid.uuid4())
+            vg_name = "ceph-%s" % str(uuid.uuid4())
             api.create_vg(vg_name, arg)
             lv_name = "osd-%s-%s" % (device_type, osd_fsid)
             return api.create_lv(
@@ -262,6 +262,7 @@ class Prepare(object):
             tags['ceph.data_uuid'] = data_lv.lv_uuid
             tags['ceph.cephx_lockbox_secret'] = cephx_lockbox_secret
             tags['ceph.encrypted'] = encrypted
+            tags['ceph.vdo'] = api.is_vdo(data_lv.lv_path)
 
             journal_device, journal_uuid, tags = self.setup_device('journal', args.journal, tags)
 
@@ -285,6 +286,7 @@ class Prepare(object):
             tags['ceph.block_uuid'] = block_lv.lv_uuid
             tags['ceph.cephx_lockbox_secret'] = cephx_lockbox_secret
             tags['ceph.encrypted'] = encrypted
+            tags['ceph.vdo'] = api.is_vdo(block_lv.lv_path)
 
             wal_device, wal_uuid, tags = self.setup_device('wal', args.block_wal, tags)
             db_device, db_uuid, tags = self.setup_device('db', args.block_db, tags)
@@ -314,37 +316,17 @@ class Prepare(object):
 
         Encryption is supported via dmcrypt and the --dmcrypt flag.
 
-        Example calls for supported scenarios:
+        Existing logical volume (lv):
 
-        Filestore
-        ---------
+            ceph-volume lvm prepare --data {vg/lv}
 
-          Existing logical volume (lv) or device:
+        Existing block device, that will be made a group and logical volume:
 
-              ceph-volume lvm prepare --filestore --data {vg/lv} --journal /path/to/device
+            ceph-volume lvm prepare --data /path/to/device
 
-          Or:
+        Optionally, can consume db and wal devices or logical volumes:
 
-              ceph-volume lvm prepare --filestore --data {vg/lv} --journal {vg/lv}
-
-          Existing block device, that will be made a group and logical volume:
-
-              ceph-volume lvm prepare --filestore --data /path/to/device --journal {vg/lv}
-
-        Bluestore
-        ---------
-
-          Existing logical volume (lv):
-
-              ceph-volume lvm prepare --bluestore --data {vg/lv}
-
-          Existing block device, that will be made a group and logical volume:
-
-              ceph-volume lvm prepare --bluestore --data /path/to/device
-
-          Optionally, can consume db and wal devices or logical volumes:
-
-              ceph-volume lvm prepare --bluestore --data {vg/lv} --block.wal {device} --block-db {vg/lv}
+            ceph-volume lvm prepare --data {vg/lv} --block.wal {device} --block.db {vg/lv}
         """)
         parser = prepare_parser(
             prog='ceph-volume lvm prepare',
@@ -353,6 +335,7 @@ class Prepare(object):
         if len(self.argv) == 0:
             print(sub_command_help)
             return
+        exclude_group_options(parser, argv=self.argv, groups=['filestore', 'bluestore'])
         args = parser.parse_args(self.argv)
         # Default to bluestore here since defaulting it in add_argument may
         # cause both to be True

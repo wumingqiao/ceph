@@ -34,7 +34,7 @@ void bluestore_bdev_label_t::encode(bufferlist& bl) const
   ENCODE_FINISH(bl);
 }
 
-void bluestore_bdev_label_t::decode(bufferlist::iterator& p)
+void bluestore_bdev_label_t::decode(bufferlist::const_iterator& p)
 {
   p.advance(60); // see above
   DECODE_START(2, p);
@@ -366,7 +366,7 @@ void bluestore_blob_use_tracker_t::init(
   clear();  
   uint32_t _num_au = round_up_to(full_length, _au_size) / _au_size;
   au_size = _au_size;
-  if( _num_au > 1 ) {
+  if ( _num_au > 1 ) {
     num_au = _num_au;
     allocate();
   }
@@ -378,7 +378,7 @@ void bluestore_blob_use_tracker_t::get(
   assert(au_size);
   if (!num_au) {
     total_bytes += length;
-  }else {
+  } else {
     auto end = offset + length;
 
     while (offset < end) {
@@ -769,7 +769,7 @@ void bluestore_blob_t::allocated(uint32_t b_off, uint32_t length, const PExtentV
     uint32_t cur_offs = 0;
     auto start_it = extents.begin();
     size_t pos = 0;
-    while(true) {
+    while (true) {
       assert(start_it != extents.end());
       if (cur_offs + start_it->length > b_off) {
 	break;

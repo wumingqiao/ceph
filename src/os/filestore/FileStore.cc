@@ -28,6 +28,7 @@
 
 #if defined(__linux__)
 #include <linux/fs.h>
+#include <linux/falloc.h>
 #endif
 
 #include <iostream>
@@ -613,7 +614,8 @@ FileStore::FileStore(CephContext* cct, const std::string &base,
   plb.add_u64(l_filestore_journal_ops, "journal_ops", "Active journal entries to be applied");
   plb.add_u64(l_filestore_journal_queue_bytes, "journal_queue_bytes", "Size of journal queue");
   plb.add_u64(l_filestore_journal_bytes, "journal_bytes", "Active journal operation size to be applied");
-  plb.add_time_avg(l_filestore_journal_latency, "journal_latency", "Average journal queue completing latency");
+  plb.add_time_avg(l_filestore_journal_latency, "journal_latency", "Average journal queue completing latency",
+                   NULL, PerfCountersBuilder::PRIO_USEFUL);
   plb.add_u64_counter(l_filestore_journal_wr, "journal_wr", "Journal write IOs");
   plb.add_u64_avg(l_filestore_journal_wr_bytes, "journal_wr_bytes", "Journal data written");
   plb.add_u64(l_filestore_op_queue_max_ops, "op_queue_max_ops", "Max operations in writing to FS queue");
@@ -629,7 +631,8 @@ FileStore::FileStore(CephContext* cct, const std::string &base,
   plb.add_time_avg(l_filestore_commitcycle_interval, "commitcycle_interval", "Average interval between commits");
   plb.add_time_avg(l_filestore_commitcycle_latency, "commitcycle_latency", "Average latency of commit");
   plb.add_u64_counter(l_filestore_journal_full, "journal_full", "Journal writes while full");
-  plb.add_time_avg(l_filestore_queue_transaction_latency_avg, "queue_transaction_latency_avg", "Store operation queue latency");
+  plb.add_time_avg(l_filestore_queue_transaction_latency_avg, "queue_transaction_latency_avg",
+                   "Store operation queue latency", NULL, PerfCountersBuilder::PRIO_USEFUL);
   plb.add_time(l_filestore_sync_pause_max_lat, "sync_pause_max_latency", "Max latency of op_wq pause before syncfs");
 
   logger = plb.create_perf_counters();
@@ -707,6 +710,11 @@ void FileStore::collect_metadata(map<string,string> *pm)
     default:
       (*pm)["backend_filestore_partition_path"] = string(partition_path);
       (*pm)["backend_filestore_dev_node"] = string(dev_node);
+      if (vdo_fd >= 0) {
+	(*pm)["vdo"] = "true";
+	(*pm)["vdo_physical_size"] =
+	  stringify(4096 * get_vdo_stat(vdo_fd, "physical_blocks"));
+      }
   }
 }
 
@@ -735,8 +743,17 @@ int FileStore::statfs(struct store_statfs_t *buf0)
     assert(r != -ENOENT);
     return r;
   }
-  buf0->total = buf.f_blocks * buf.f_bsize;
-  buf0->available = buf.f_bavail * buf.f_bsize;
+
+  uint64_t bfree = buf.f_bavail * buf.f_bsize;
+  uint64_t thin_total, thin_avail;
+  if (get_vdo_utilization(vdo_fd, &thin_total, &thin_avail)) {
+    buf0->total = thin_total;
+    bfree = std::min(bfree, thin_avail);
+  } else {
+    buf0->total = buf.f_blocks * buf.f_bsize;
+  }
+  buf0->available = bfree;
+
   // Adjust for writes pending in the journal
   if (journal) {
     uint64_t estimate = journal->get_journal_size_estimate();
@@ -777,7 +794,7 @@ int FileStore::dump_journal(ostream& out)
   return r;
 }
 
-FileStoreBackend *FileStoreBackend::create(long f_type, FileStore *fs)
+FileStoreBackend *FileStoreBackend::create(unsigned long f_type, FileStore *fs)
 {
   switch (f_type) {
 #if defined(__linux__)
@@ -797,7 +814,7 @@ FileStoreBackend *FileStoreBackend::create(long f_type, FileStore *fs)
   }
 }
 
-void FileStore::create_backend(long f_type)
+void FileStore::create_backend(unsigned long f_type)
 {
   m_fs_type = f_type;
 
@@ -1223,6 +1240,20 @@ int FileStore::_detect_fs()
     return r;
   }
 
+  // vdo
+  {
+    char partition_path[PATH_MAX];
+    char dev_node[PATH_MAX];
+    int rc = get_device_by_fd(fsid_fd, partition_path, dev_node, PATH_MAX);
+    if (rc == 0) {
+      vdo_fd = get_vdo_stats_handle(dev_node, &vdo_name);
+      if (vdo_fd >= 0) {
+	dout(0) << __func__ << " VDO volume " << vdo_name << " for " << dev_node
+		<< dendl;
+      }
+    }
+  }
+
   // test xattrs
   char fn[PATH_MAX];
   int x = rand();
@@ -1337,7 +1368,7 @@ int FileStore::read_superblock()
 
   bufferlist bl;
   bl.push_back(std::move(bp));
-  bufferlist::iterator i = bl.begin();
+  auto i = bl.cbegin();
   decode(superblock, i);
   return 0;
 }
@@ -1357,7 +1388,7 @@ int FileStore::version_stamp_is_valid(uint32_t *version)
   }
   bufferlist bl;
   bl.push_back(std::move(bp));
-  bufferlist::iterator i = bl.begin();
+  auto i = bl.cbegin();
   decode(*version, i);
   dout(10) << __FUNC__ << ": was " << *version << " vs target "
 	   << target_version << dendl;
@@ -1958,6 +1989,11 @@ int FileStore::umount()
   sync();
   do_force_sync();
 
+  {
+    Mutex::Locker l(coll_lock);
+    coll_map.clear();
+  }
+
   lock.Lock();
   stop = true;
   sync_cond.Signal();
@@ -1979,6 +2015,10 @@ int FileStore::umount()
     (*it)->stop();
   }
 
+  if (vdo_fd >= 0) {
+    VOID_TEMP_FAILURE_RETRY(::close(vdo_fd));
+    vdo_fd = -1;
+  }
   if (fsid_fd >= 0) {
     VOID_TEMP_FAILURE_RETRY(::close(fsid_fd));
     fsid_fd = -1;
@@ -2015,6 +2055,10 @@ int FileStore::umount()
 
 /// -----------------------------
 
+// keep OpSequencer handles alive for all time so that a sequence
+// that removes a collection and creates a new one will not allow
+// two sequencers for the same collection to be alive at once.
+
 ObjectStore::CollectionHandle FileStore::open_collection(const coll_t& c)
 {
   Mutex::Locker l(coll_lock);
@@ -2028,9 +2072,14 @@ ObjectStore::CollectionHandle FileStore::open_collection(const coll_t& c)
 ObjectStore::CollectionHandle FileStore::create_new_collection(const coll_t& c)
 {
   Mutex::Locker l(coll_lock);
-  auto *r = new OpSequencer(cct, ++next_osr_id, c);
-  coll_map[c] = r;
-  return r;
+  auto p = coll_map.find(c);
+  if (p == coll_map.end()) {
+    auto *r = new OpSequencer(cct, ++next_osr_id, c);
+    coll_map[c] = r;
+    return r;
+  } else {
+    return p->second;
+  }
 }
 
 
@@ -2124,15 +2173,14 @@ void FileStore::_do_op(OpSequencer *osr, ThreadPool::TPHandle &handle)
   apply_manager.op_apply_finish(o->op);
   dout(10) << __FUNC__ << ": " << o << " seq " << o->op << " r = " << r
 	   << ", finisher " << o->onreadable << " " << o->onreadable_sync << dendl;
-
-  o->tls.clear();
-
 }
 
 void FileStore::_finish_op(OpSequencer *osr)
 {
   list<Context*> to_queue;
   Op *o = osr->dequeue(&to_queue);
+
+  o->tls.clear();
 
   utime_t lat = ceph_clock_now();
   lat -= o->start;
@@ -2158,7 +2206,6 @@ void FileStore::_finish_op(OpSequencer *osr)
   delete o;
   o = nullptr;
 }
-
 
 struct C_JournaledAhead : public Context {
   FileStore *fs;
@@ -2242,7 +2289,7 @@ int FileStore::queue_transactions(CollectionHandle& ch, vector<Transaction>& tls
     } else if (m_filestore_journal_writeahead) {
       dout(5) << __FUNC__ << ": (writeahead) " << o->op << " " << o->tls << dendl;
 
-      osr->queue_journal(o->op);
+      osr->queue_journal(o);
 
       trace.keyval("journal mode", "writeahead");
       trace.event("journal started");
@@ -2447,7 +2494,7 @@ int FileStore::_check_global_replay_guard(const coll_t& cid,
   bl.append(buf, r);
 
   SequencerPosition opos;
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   decode(opos, p);
 
   VOID_TEMP_FAILURE_RETRY(::close(fd));
@@ -2619,7 +2666,7 @@ int FileStore::_check_replay_guard(int fd, const SequencerPosition& spos)
   bl.append(buf, r);
 
   SequencerPosition opos;
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   decode(opos, p);
   bool in_progress = false;
   if (!p.end())   // older journals don't have this
@@ -2884,7 +2931,7 @@ void FileStore::_do_transaction(
         uint32_t type = op->hint_type;
         bufferlist hint;
         i.decode_bl(hint);
-        bufferlist::iterator hiter = hint.begin();
+        auto hiter = hint.cbegin();
         if (type == Transaction::COLL_HINT_EXPECTED_NUM_OBJECTS) {
           uint32_t pg_num;
           uint64_t num_objs;
@@ -3206,6 +3253,8 @@ void FileStore::_do_transaction(
 bool FileStore::exists(CollectionHandle& ch, const ghobject_t& oid)
 {
   tracepoint(objectstore, exists_enter, ch->cid.c_str());
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
   struct stat st;
   bool retval = stat(ch, oid, &st) == 0;
   tracepoint(objectstore, exists_exit, retval);
@@ -3216,6 +3265,8 @@ int FileStore::stat(
   CollectionHandle& ch, const ghobject_t& oid, struct stat *st, bool allow_eio)
 {
   tracepoint(objectstore, stat_enter, ch->cid.c_str());
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
   const coll_t& cid = !_need_temp_object_collection(ch->cid, oid) ? ch->cid : ch->cid.get_temp();
   int r = lfn_stat(cid, oid, st);
   assert(allow_eio || !m_filestore_fail_eio || r != -EIO);
@@ -3256,6 +3307,9 @@ int FileStore::read(
   const coll_t& cid = !_need_temp_object_collection(ch->cid, oid) ? ch->cid : ch->cid.get_temp();
 
   dout(15) << __FUNC__ << ": " << cid << "/" << oid << " " << offset << "~" << len << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
 
   FDRef fd;
   int r = lfn_open(cid, oid, false, &fd);
@@ -3315,8 +3369,10 @@ int FileStore::read(
   if (cct->_conf->filestore_debug_inject_read_err &&
       debug_data_eio(oid)) {
     return -EIO;
-  } else if (cct->_conf->filestore_debug_random_read_err &&
-    (rand() % (int)(cct->_conf->filestore_debug_random_read_err * 100.0)) == 0) {
+  } else if (oid.hobj.pool > 0 &&  /* FIXME, see #23029 */
+	     cct->_conf->filestore_debug_random_read_err &&
+	     (rand() % (int)(cct->_conf->filestore_debug_random_read_err *
+			     100.0)) == 0) {
     dout(0) << __func__ << ": inject random EIO" << dendl;
     return -EIO;
   } else {
@@ -3465,6 +3521,9 @@ int FileStore::fiemap(CollectionHandle& ch, const ghobject_t& oid,
   }
 
   dout(15) << __FUNC__ << ": " << cid << "/" << oid << " " << offset << "~" << len << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
 
   FDRef fd;
 
@@ -3914,7 +3973,7 @@ int FileStore::_do_copy_range(int from, int to, uint64_t srcoff, uint64_t len, u
   if (r < 0 && replaying) {
     assert(r == -ERANGE);
     derr << __FUNC__ << ": short source tolerated because we are replaying" << dendl;
-    r = pos - from;;
+    r = len;
   }
   assert(replaying || pos == end);
   if (r >= 0 && !skip_sloppycrc && m_filestore_sloppy_crc) {
@@ -4430,6 +4489,10 @@ int FileStore::getattr(CollectionHandle& ch, const ghobject_t& oid, const char *
   tracepoint(objectstore, getattr_enter, ch->cid.c_str());
   const coll_t& cid = !_need_temp_object_collection(ch->cid, oid) ? ch->cid : ch->cid.get_temp();
   dout(15) << __FUNC__ << ": " << cid << "/" << oid << " '" << name << "'" << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
+
   FDRef fd;
   int r = lfn_open(cid, oid, false, &fd);
   if (r < 0) {
@@ -4482,6 +4545,10 @@ int FileStore::getattrs(CollectionHandle& ch, const ghobject_t& oid, map<string,
   map<string, bufferlist> omap_aset;
   Index index;
   dout(15) << __FUNC__ << ": " << cid << "/" << oid << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
+
   FDRef fd;
   bool spill_out = true;
   char buf[2];
@@ -4827,7 +4894,11 @@ int FileStore::list_collections(vector<coll_t>& ls, bool include_temp)
       // d_type not supported (non-ext[234], btrfs), must stat
       struct stat sb;
       char filename[PATH_MAX];
-      snprintf(filename, sizeof(filename), "%s/%s", fn, de->d_name);
+      if (int n = snprintf(filename, sizeof(filename), "%s/%s", fn, de->d_name);
+	  n >= static_cast<int>(sizeof(filename))) {
+	derr << __func__ << " path length overrun: " << n << dendl;
+	assert(false);
+      }
 
       r = ::stat(filename, &sb);
       if (r < 0) {
@@ -5059,6 +5130,10 @@ int FileStore::omap_get(CollectionHandle& ch, const ghobject_t &hoid,
   tracepoint(objectstore, omap_get_enter, ch->cid.c_str());
   const coll_t& c = !_need_temp_object_collection(ch->cid, hoid) ? ch->cid : ch->cid.get_temp();
   dout(15) << __FUNC__ << ": " << c << "/" << hoid << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(hoid);
+
   Index index;
   int r = get_index(c, &index);
   if (r < 0)
@@ -5088,6 +5163,10 @@ int FileStore::omap_get_header(
   tracepoint(objectstore, omap_get_header_enter, ch->cid.c_str());
   const coll_t& c = !_need_temp_object_collection(ch->cid, hoid) ? ch->cid : ch->cid.get_temp();
   dout(15) << __FUNC__ << ": " << c << "/" << hoid << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(hoid);
+
   Index index;
   int r = get_index(c, &index);
   if (r < 0)
@@ -5113,6 +5192,10 @@ int FileStore::omap_get_keys(CollectionHandle& ch, const ghobject_t &hoid, set<s
   tracepoint(objectstore, omap_get_keys_enter, ch->cid.c_str());
   const coll_t& c = !_need_temp_object_collection(ch->cid, hoid) ? ch->cid : ch->cid.get_temp();
   dout(15) << __FUNC__ << ": " << c << "/" << hoid << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(hoid);
+
   Index index;
   int r = get_index(c, &index);
   if (r < 0)
@@ -5140,6 +5223,10 @@ int FileStore::omap_get_values(CollectionHandle& ch, const ghobject_t &hoid,
   tracepoint(objectstore, omap_get_values_enter, ch->cid.c_str());
   const coll_t& c = !_need_temp_object_collection(ch->cid, hoid) ? ch->cid : ch->cid.get_temp();
   dout(15) << __FUNC__ << ": " << c << "/" << hoid << dendl;
+
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(hoid);
+
   Index index;
   const char *where = "()";
   int r = get_index(c, &index);
@@ -5178,6 +5265,9 @@ int FileStore::omap_check_keys(CollectionHandle& ch, const ghobject_t &hoid,
   const coll_t& c = !_need_temp_object_collection(ch->cid, hoid) ? ch->cid : ch->cid.get_temp();
   dout(15) << __FUNC__ << ": " << c << "/" << hoid << dendl;
 
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(hoid);
+
   Index index;
   int r = get_index(c, &index);
   if (r < 0)
@@ -5196,6 +5286,15 @@ int FileStore::omap_check_keys(CollectionHandle& ch, const ghobject_t &hoid,
   }
   tracepoint(objectstore, omap_check_keys_exit, 0);
   return 0;
+}
+
+ObjectMap::ObjectMapIterator FileStore::get_omap_iterator(
+  CollectionHandle& ch,
+  const ghobject_t &oid)
+{
+  auto osr = static_cast<OpSequencer*>(ch.get());
+  osr->wait_for_apply(oid);
+  return get_omap_iterator(ch->cid, oid);
 }
 
 ObjectMap::ObjectMapIterator FileStore::get_omap_iterator(const coll_t& _c,
@@ -5312,11 +5411,6 @@ int FileStore::_destroy_collection(const coll_t& c)
   if (r < 0) {
     r = -errno;
     goto out;
-  }
-
-  {
-    Mutex::Locker l(coll_lock);
-    coll_map.erase(c);
   }
 
  out:
@@ -5549,7 +5643,7 @@ int FileStore::_omap_setkeys(const coll_t& cid, const ghobject_t &hoid,
     }
   }
 skip:
-  if (g_conf->subsys.should_gather(ceph_subsys_filestore, 20)) {
+  if (g_conf->subsys.should_gather<ceph_subsys_filestore, 20>()) {
     for (auto& p : aset) {
       dout(20) << __FUNC__ << ":  set " << p.first << dendl;
     }
@@ -5860,8 +5954,12 @@ int FileStore::set_throttle_params()
     cct->_conf->filestore_queue_low_threshhold,
     cct->_conf->filestore_queue_high_threshhold,
     cct->_conf->filestore_expected_throughput_bytes,
-    cct->_conf->filestore_queue_high_delay_multiple,
-    cct->_conf->filestore_queue_max_delay_multiple,
+    cct->_conf->filestore_queue_high_delay_multiple?
+    cct->_conf->filestore_queue_high_delay_multiple:
+    cct->_conf->filestore_queue_high_delay_multiple_bytes,
+    cct->_conf->filestore_queue_max_delay_multiple?
+    cct->_conf->filestore_queue_max_delay_multiple:
+    cct->_conf->filestore_queue_max_delay_multiple_bytes,
     cct->_conf->filestore_queue_max_bytes,
     &ss);
 
@@ -5869,8 +5967,12 @@ int FileStore::set_throttle_params()
     cct->_conf->filestore_queue_low_threshhold,
     cct->_conf->filestore_queue_high_threshhold,
     cct->_conf->filestore_expected_throughput_ops,
-    cct->_conf->filestore_queue_high_delay_multiple,
-    cct->_conf->filestore_queue_max_delay_multiple,
+    cct->_conf->filestore_queue_high_delay_multiple?
+    cct->_conf->filestore_queue_high_delay_multiple:
+    cct->_conf->filestore_queue_high_delay_multiple_ops,
+    cct->_conf->filestore_queue_max_delay_multiple?
+    cct->_conf->filestore_queue_max_delay_multiple:
+    cct->_conf->filestore_queue_max_delay_multiple_ops,
     cct->_conf->filestore_queue_max_ops,
     &ss);
 
@@ -6015,7 +6117,7 @@ void FSSuperblock::encode(bufferlist &bl) const
   ENCODE_FINISH(bl);
 }
 
-void FSSuperblock::decode(bufferlist::iterator &bl)
+void FSSuperblock::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START(2, bl);
   compat_features.decode(bl);
@@ -6047,4 +6149,71 @@ void FSSuperblock::generate_test_instances(list<FSSuperblock*>& o)
   o.push_back(new FSSuperblock(z));
   z.omap_backend = "rocksdb";
   o.push_back(new FSSuperblock(z));
+}
+
+#undef dout_prefix
+#define dout_prefix *_dout << "filestore.osr(" << this << ") "
+
+void FileStore::OpSequencer::_register_apply(Op *o)
+{
+  if (o->registered_apply) {
+    dout(20) << __func__ << " " << o << " already registered" << dendl;
+    return;
+  }
+  o->registered_apply = true;
+  for (auto& t : o->tls) {
+    for (auto& i : t.get_object_index()) {
+      uint32_t key = i.first.hobj.get_hash();
+      applying.emplace(make_pair(key, &i.first));
+      dout(20) << __func__ << " " << o << " " << i.first << " ("
+	       << &i.first << ")" << dendl;
+    }
+  }
+}
+
+void FileStore::OpSequencer::_unregister_apply(Op *o)
+{
+  assert(o->registered_apply);
+  for (auto& t : o->tls) {
+    for (auto& i : t.get_object_index()) {
+      uint32_t key = i.first.hobj.get_hash();
+      auto p = applying.find(key);
+      bool removed = false;
+      while (p != applying.end() &&
+	     p->first == key) {
+	if (p->second == &i.first) {
+	  dout(20) << __func__ << " " << o << " " << i.first << " ("
+		   << &i.first << ")" << dendl;
+	  applying.erase(p);
+	  removed = true;
+	  break;
+	}
+	++p;
+      }
+      assert(removed);
+    }
+  }
+}
+
+void FileStore::OpSequencer::wait_for_apply(const ghobject_t& oid)
+{
+  Mutex::Locker l(qlock);
+  uint32_t key = oid.hobj.get_hash();
+retry:
+  while (true) {
+    // search all items in hash slot for a matching object
+    auto p = applying.find(key);
+    while (p != applying.end() &&
+	   p->first == key) {
+      if (*p->second == oid) {
+	dout(20) << __func__ << " " << oid << " waiting on " << p->second
+		 << dendl;
+	cond.Wait(qlock);
+	goto retry;
+      }
+      ++p;
+    }
+    break;
+  }
+  dout(20) << __func__ << " " << oid << " done" << dendl;
 }

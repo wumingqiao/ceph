@@ -7,6 +7,7 @@
 #include "cls/rbd/cls_rbd_client.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Utils.h"
+#include "librbd/cache/ObjectCacherObjectDispatch.h"
 #include "librbd/image/CloseRequest.h"
 #include "librbd/image/RefreshRequest.h"
 #include "librbd/image/SetSnapRequest.h"
@@ -135,7 +136,7 @@ Context *OpenRequest<I>::handle_v2_get_id(int *result) {
   ldout(cct, 10) << __func__ << ": r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::get_id_finish(&it, &m_image_ctx->id);
   }
   if (*result < 0) {
@@ -170,11 +171,11 @@ Context *OpenRequest<I>::handle_v2_get_name(int *result) {
   ldout(cct, 10) << __func__ << ": r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::dir_get_name_finish(&it, &m_image_ctx->name);
   }
   if (*result < 0 && *result != -ENOENT) {
-    lderr(cct) << "failed to retreive name: "
+    lderr(cct) << "failed to retrieve name: "
                << cpp_strerror(*result) << dendl;
     send_close_image(*result);
   } else if (*result == -ENOENT) {
@@ -211,7 +212,7 @@ Context *OpenRequest<I>::handle_v2_get_name_from_trash(int *result) {
 
   cls::rbd::TrashImageSpec trash_spec;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::trash_get_finish(&it, &trash_spec);
     m_image_ctx->name = trash_spec.name;
   }
@@ -223,7 +224,7 @@ Context *OpenRequest<I>::handle_v2_get_name_from_trash(int *result) {
       ldout(cct, 5) << "failed to retrieve name for image id "
                     << m_image_ctx->id << dendl;
     } else {
-      lderr(cct) << "failed to retreive name from trash: "
+      lderr(cct) << "failed to retrieve name from trash: "
                  << cpp_strerror(*result) << dendl;
     }
     send_close_image(*result);
@@ -260,12 +261,12 @@ Context *OpenRequest<I>::handle_v2_get_initial_metadata(int *result) {
   ldout(cct, 10) << __func__ << ": r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::get_initial_metadata_finish(
       &it, &m_image_ctx->object_prefix, &m_image_ctx->order, &m_image_ctx->features);
   }
   if (*result < 0) {
-    lderr(cct) << "failed to retreive initial metadata: "
+    lderr(cct) << "failed to retrieve initial metadata: "
                << cpp_strerror(*result) << dendl;
     send_close_image(*result);
     return nullptr;
@@ -303,7 +304,7 @@ Context *OpenRequest<I>::handle_v2_get_stripe_unit_count(int *result) {
   ldout(cct, 10) << __func__ << ": r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::get_stripe_unit_count_finish(
       &it, &m_image_ctx->stripe_unit, &m_image_ctx->stripe_count);
   }
@@ -346,7 +347,7 @@ Context *OpenRequest<I>::handle_v2_get_create_timestamp(int *result) {
   ldout(cct, 10) << this << " " << __func__ << ": r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::get_create_timestamp_finish(&it,
         &m_image_ctx->create_timestamp);
   }
@@ -386,7 +387,7 @@ Context *OpenRequest<I>::handle_v2_get_data_pool(int *result) {
 
   int64_t data_pool_id = -1;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::get_data_pool_finish(&it, &data_pool_id);
   } else if (*result == -EOPNOTSUPP) {
     *result = 0;
@@ -441,7 +442,28 @@ Context *OpenRequest<I>::handle_refresh(int *result) {
     return nullptr;
   }
 
-  m_image_ctx->init_cache();
+  return send_init_cache(result);
+}
+
+template <typename I>
+Context *OpenRequest<I>::send_init_cache(int *result) {
+  // cache is disabled or parent image context
+  if (!m_image_ctx->cache || m_image_ctx->child != nullptr) {
+    return send_register_watch(result);
+  }
+
+  CephContext *cct = m_image_ctx->cct;
+  ldout(cct, 10) << this << " " << __func__ << dendl;
+
+  auto cache = cache::ObjectCacherObjectDispatch<I>::create(m_image_ctx);
+  cache->init();
+
+  // readahead requires the cache
+  m_image_ctx->readahead.set_trigger_requests(
+    m_image_ctx->readahead_trigger_requests);
+  m_image_ctx->readahead.set_max_readahead_size(
+    m_image_ctx->readahead_max_bytes);
+
   return send_register_watch(result);
 }
 
@@ -486,9 +508,20 @@ Context *OpenRequest<I>::send_set_snap(int *result) {
   CephContext *cct = m_image_ctx->cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
 
+  uint64_t snap_id = CEPH_NOSNAP;
+  {
+    RWLock::RLocker snap_locker(m_image_ctx->snap_lock);
+    snap_id = m_image_ctx->get_snap_id(m_image_ctx->snap_namespace,
+                                       m_image_ctx->snap_name);
+  }
+  if (snap_id == CEPH_NOSNAP) {
+    *result = -ENOENT;
+    return m_on_finish;
+  }
+
   using klass = OpenRequest<I>;
   SetSnapRequest<I> *req = SetSnapRequest<I>::create(
-    *m_image_ctx, m_image_ctx->snap_namespace, m_image_ctx->snap_name,
+    *m_image_ctx, snap_id,
     create_context_callback<klass, &klass::handle_set_snap>(this));
   req->send();
   return nullptr;

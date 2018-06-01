@@ -355,6 +355,14 @@ int main(int argc, const char **argv)
 {
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
+  if (args.empty()) {
+    cerr << argv[0] << ": -h or --help for usage" << std::endl;
+    exit(1);
+  }
+  if (ceph_argparse_need_usage(args)) {
+    usage();
+    exit(0);
+  }
 
   const char *me = argv[0];
   std::string infn, srcfn, outfn, add_name, add_type, remove_name, reweight_name;
@@ -406,9 +414,8 @@ int main(int argc, const char **argv)
 
   // we use -c, don't confuse the generic arg parsing
   // only parse arguments from CEPH_ARGS, if in the environment
-  vector<const char *> env_args;
-  env_to_vec(env_args);
-  auto cct = global_init(NULL, env_args, CEPH_ENTITY_TYPE_CLIENT,
+  vector<const char *> empty_args;
+  auto cct = global_init(NULL, empty_args, CEPH_ENTITY_TYPE_CLIENT,
 			 CODE_ENVIRONMENT_UTILITY,
 			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   // crushtool times out occasionally when quits. so do not
@@ -426,9 +433,6 @@ int main(int argc, const char **argv)
   for (std::vector<const char*>::iterator i = args.begin(); i != args.end(); ) {
     if (ceph_argparse_double_dash(args, i)) {
       break;
-    } else if (ceph_argparse_flag(args, i, "-h", "--help", (char*)NULL)) {
-      usage();
-      return EXIT_SUCCESS;
     } else if (ceph_argparse_witharg(args, i, &val, "-d", "--decompile", (char*)NULL)) {
       infn = val;
       decompile = true;
@@ -826,7 +830,7 @@ int main(int argc, const char **argv)
         return EXIT_FAILURE;
       }
     }
-    bufferlist::iterator p = bl.begin();
+    auto p = bl.cbegin();
     try {
       crush.decode(p);
     } catch(...) {

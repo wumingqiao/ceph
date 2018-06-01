@@ -49,7 +49,7 @@ public:
   {}
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &p);
+  void decode(bufferlist::const_iterator &p);
 };
 WRITE_CLASS_ENCODER(PurgeItem)
 
@@ -94,6 +94,8 @@ protected:
 
   // Map of Journaler offset to PurgeItem
   std::map<uint64_t, PurgeItem> in_flight;
+
+  std::set<uint64_t> pending_expire;
 
   // Throttled allowances
   uint64_t ops_in_flight;

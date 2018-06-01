@@ -15,6 +15,7 @@
 #ifndef ECUTIL_H
 #define ECUTIL_H
 
+#include <ostream>
 #include "erasure-code/ErasureCodeInterface.h"
 #include "include/buffer_fwd.h"
 #include "include/assert.h"
@@ -115,7 +116,7 @@ public:
       -1);
   }
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &bl);
+  void decode(bufferlist::const_iterator &bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(std::list<HashInfo*>& o);
   uint32_t get_chunk_hash(int shard) const {
@@ -155,6 +156,7 @@ public:
     *this = rhs;
     projected_total_chunk_size = ptcs;
   }
+  friend std::ostream& operator<<(std::ostream& out, const HashInfo& hi);
 };
 
 typedef ceph::shared_ptr<HashInfo> HashInfoRef;

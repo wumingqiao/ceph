@@ -51,7 +51,7 @@ public:
   DecayRate rate;
 
   void encode(bufferlist& bl) const;
-  void decode(const utime_t &t, bufferlist::iterator& p);
+  void decode(const utime_t &t, bufferlist::const_iterator& p);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<DecayCounter*>& ls);
 
@@ -68,7 +68,7 @@ public:
   // these two functions are for the use of our dencoder testing infrastructure
   DecayCounter() : val(0), delta(0), vel(0), last_decay() {}
 
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     utime_t fake_time;
     decode(fake_time, p);
   }
@@ -86,15 +86,15 @@ public:
     return val+delta;
   }
 
-  double get_last() {
+  double get_last() const {
     return val;
   }
   
-  double get_last_vel() {
+  double get_last_vel() const {
     return vel;
   }
 
-  utime_t get_last_decay() { 
+  utime_t get_last_decay() const {
     return last_decay; 
   }
 
@@ -115,10 +115,12 @@ public:
 
   void adjust(double a) {
     val += a;
+    if (val < 0)
+      val = 0;
   }
   void adjust(utime_t now, const DecayRate& rate, double a) {
     decay(now, rate);
-    val += a;
+    adjust(a);
   }
   void scale(double f) {
     val *= f;
@@ -139,11 +141,11 @@ public:
 };
 
 inline void encode(const DecayCounter &c, bufferlist &bl) { c.encode(bl); }
-inline void decode(DecayCounter &c, const utime_t &t, bufferlist::iterator &p) {
+inline void decode(DecayCounter &c, const utime_t &t, bufferlist::const_iterator &p) {
   c.decode(t, p);
 }
 // for dencoder
-inline void decode(DecayCounter &c, bufferlist::iterator &p) {
+inline void decode(DecayCounter &c, bufferlist::const_iterator &p) {
   utime_t t;
   c.decode(t, p);
 }

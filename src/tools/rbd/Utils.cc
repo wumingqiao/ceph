@@ -67,7 +67,7 @@ int read_string(int fd, unsigned max, std::string *out) {
 
   bufferlist bl;
   bl.append(buf, 4);
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   uint32_t len;
   decode(len, p);
   if (len > max)
@@ -773,6 +773,11 @@ int get_image_options(const boost::program_options::variables_map &vm,
     return r;
   }
 
+  r = get_flatten_option(vm, opts);
+  if (r < 0) {
+    return r;
+  }
+
   return 0;
 }
 
@@ -808,6 +813,15 @@ int get_journal_options(const boost::program_options::variables_map &vm,
     assert(r == 0);
   }
 
+  return 0;
+}
+
+int get_flatten_option(const boost::program_options::variables_map &vm,
+                       librbd::ImageOptions *opts) {
+  if (vm.count(at::IMAGE_FLATTEN) && vm[at::IMAGE_FLATTEN].as<bool>()) {
+    uint64_t flatten = 1;
+    opts->set(RBD_IMAGE_OPTION_FLATTEN, flatten);
+  }
   return 0;
 }
 
@@ -905,6 +919,10 @@ int init_io_ctx(librados::Rados &rados, const std::string &pool_name,
     return r;
   }
   return 0;
+}
+
+void disable_cache() {
+  g_conf->set_val_or_die("rbd_cache", "false");
 }
 
 int open_image(librados::IoCtx &io_ctx, const std::string &image_name,
@@ -1097,6 +1115,17 @@ bool check_if_image_spec_present(const po::variables_map &vm,
   }
 
   return false;
+}
+
+bool is_not_user_snap_namespace(librbd::Image* image,
+                                const librbd::snap_info_t &snap_info)
+{
+  librbd::snap_namespace_type_t namespace_type;
+  int r = image->snap_get_namespace_type(snap_info.id, &namespace_type);
+  if (r < 0) {
+    return false;
+  }
+  return namespace_type != RBD_SNAP_NAMESPACE_TYPE_USER;
 }
 
 } // namespace utils

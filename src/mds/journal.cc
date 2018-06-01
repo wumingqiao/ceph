@@ -155,22 +155,7 @@ void LogSegment::try_to_expire(MDSRank *mds, MDSGatherBuilder &gather_bld, int o
     while (!p.end()) {
       CInode *in = *p;
       ++p;
-      if (in->last == CEPH_NOSNAP && in->is_auth() &&
-	  !in->is_ambiguous_auth() && in->is_any_caps()) {
-	if (in->is_any_caps_wanted()) {
-	  dout(20) << "try_to_expire requeueing open file " << *in << dendl;
-	  if (!le) {
-	    le = new EOpen(mds->mdlog);
-	    mds->mdlog->start_entry(le);
-	  }
-	  le->add_clean_inode(in);
-	  ls->open_files.push_back(&in->item_open_file);
-	} else {
-	  // drop inodes that aren't wanted
-	  dout(20) << "try_to_expire not requeueing and delisting unwanted file " << *in << dendl;
-	  in->item_open_file.remove_myself();
-	}
-      } else if (in->last != CEPH_NOSNAP && !in->client_snap_caps.empty()) {
+      if (in->last != CEPH_NOSNAP && in->is_auth() && !in->client_snap_caps.empty()) {
 	// journal snap inodes that need flush. This simplify the mds failover hanlding
 	dout(20) << "try_to_expire requeueing snap needflush inode " << *in << dendl;
 	if (!le) {
@@ -180,16 +165,7 @@ void LogSegment::try_to_expire(MDSRank *mds, MDSGatherBuilder &gather_bld, int o
 	le->add_clean_inode(in);
 	ls->open_files.push_back(&in->item_open_file);
       } else {
-	/*
-	 * we can get a capless inode here if we replay an open file, the client fails to
-	 * reconnect it, but does REPLAY an open request (that adds it to the logseg).  AFAICS
-	 * it's ok for the client to replay an open on a file it doesn't have in it's cache
-	 * anymore.
-	 *
-	 * this makes the mds less sensitive to strict open_file consistency, although it does
-	 * make it easier to miss subtle problems.
-	 */
-	dout(20) << "try_to_expire not requeueing and delisting capless file " << *in << dendl;
+	// open files are tracked by open file table, no need to journal them again
 	in->item_open_file.remove_myself();
       }
     }
@@ -441,7 +417,7 @@ void EMetaBlob::fullbit::encode(bufferlist& bl, uint64_t features) const {
   ENCODE_FINISH(bl);
 }
 
-void EMetaBlob::fullbit::decode(bufferlist::iterator &bl) {
+void EMetaBlob::fullbit::decode(bufferlist::const_iterator &bl) {
   DECODE_START_LEGACY_COMPAT_LEN(7, 5, 5, bl);
   decode(dn, bl);
   decode(dnfirst, bl);
@@ -620,7 +596,7 @@ void EMetaBlob::remotebit::encode(bufferlist& bl) const
   ENCODE_FINISH(bl);
 }
 
-void EMetaBlob::remotebit::decode(bufferlist::iterator &bl)
+void EMetaBlob::remotebit::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
   decode(dn, bl);
@@ -684,7 +660,7 @@ void EMetaBlob::nullbit::encode(bufferlist& bl) const
   ENCODE_FINISH(bl);
 }
 
-void EMetaBlob::nullbit::decode(bufferlist::iterator &bl)
+void EMetaBlob::nullbit::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
   decode(dn, bl);
@@ -727,7 +703,7 @@ void EMetaBlob::dirlump::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void EMetaBlob::dirlump::decode(bufferlist::iterator &bl)
+void EMetaBlob::dirlump::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl)
   decode(fnode, bl);
@@ -818,7 +794,7 @@ void EMetaBlob::encode(bufferlist& bl, uint64_t features) const
   encode(client_flushes, bl);
   ENCODE_FINISH(bl);
 }
-void EMetaBlob::decode(bufferlist::iterator &bl)
+void EMetaBlob::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(7, 5, 5, bl);
   decode(lump_order, bl);
@@ -829,7 +805,7 @@ void EMetaBlob::decode(bufferlist::iterator &bl)
     bufferlist rootbl;
     decode(rootbl, bl);
     if (rootbl.length()) {
-      bufferlist::iterator p = rootbl.begin();
+      auto p = rootbl.cbegin();
       roots.push_back(ceph::shared_ptr<fullbit>(new fullbit(p)));
     }
   }
@@ -1341,7 +1317,7 @@ void EMetaBlob::replay(MDSRank *mds, LogSegment *logseg, MDSlaveUpdate *slaveup)
       if (p->is_dirty())
 	in->_mark_dirty(logseg);
       if (p->is_dirty_parent())
-	in->_mark_dirty_parent(logseg, p->is_dirty_pool());
+	in->mark_dirty_parent(logseg, p->is_dirty_pool());
       if (p->need_snapflush())
 	logseg->open_files.push_back(&in->item_open_file);
       if (dn->is_auth())
@@ -1619,21 +1595,24 @@ void EMetaBlob::replay(MDSRank *mds, LogSegment *logseg, MDSlaveUpdate *slaveup)
   }
 
   // destroyed inodes
-  for (vector<inodeno_t>::iterator p = destroyed_inodes.begin();
-       p != destroyed_inodes.end();
-       ++p) {
-    CInode *in = mds->mdcache->get_inode(*p);
-    if (in) {
-      dout(10) << "EMetaBlob.replay destroyed " << *p << ", dropping " << *in << dendl;
-      CDentry *parent = in->get_parent_dn();
-      mds->mdcache->remove_inode(in);
-      if (parent) {
-        dout(10) << "EMetaBlob.replay unlinked from dentry " << *parent << dendl;
-        assert(parent->get_linkage()->is_null());
+  if (!destroyed_inodes.empty()) {
+    for (vector<inodeno_t>::iterator p = destroyed_inodes.begin();
+	p != destroyed_inodes.end();
+	++p) {
+      CInode *in = mds->mdcache->get_inode(*p);
+      if (in) {
+	dout(10) << "EMetaBlob.replay destroyed " << *p << ", dropping " << *in << dendl;
+	CDentry *parent = in->get_parent_dn();
+	mds->mdcache->remove_inode(in);
+	if (parent) {
+	  dout(10) << "EMetaBlob.replay unlinked from dentry " << *parent << dendl;
+	  assert(parent->get_linkage()->is_null());
+	}
+      } else {
+	dout(10) << "EMetaBlob.replay destroyed " << *p << ", not in cache" << dendl;
       }
-    } else {
-      dout(10) << "EMetaBlob.replay destroyed " << *p << ", not in cache" << dendl;
     }
+    mds->mdcache->open_file_table.note_destroyed_inos(logseg->seq, destroyed_inodes);
   }
 
   // client requests
@@ -1753,7 +1732,7 @@ void ESession::encode(bufferlist &bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void ESession::decode(bufferlist::iterator &bl)
+void ESession::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(4, 3, 3, bl);
   if (struct_v >= 2)
@@ -1801,7 +1780,7 @@ void ESessions::encode(bufferlist &bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void ESessions::decode_old(bufferlist::iterator &bl)
+void ESessions::decode_old(bufferlist::const_iterator &bl)
 {
   using ceph::decode;
   decode(client_map, bl);
@@ -1810,7 +1789,7 @@ void ESessions::decode_old(bufferlist::iterator &bl)
     decode(stamp, bl);
 }
 
-void ESessions::decode_new(bufferlist::iterator &bl)
+void ESessions::decode_new(bufferlist::const_iterator &bl)
 {
   DECODE_START(1, bl);
   decode(client_map, bl);
@@ -1853,9 +1832,8 @@ void ESessions::replay(MDSRank *mds)
   } else {
     dout(10) << "ESessions.replay sessionmap " << mds->sessionmap.get_version()
 	     << " < " << cmapv << dendl;
-    mds->sessionmap.open_sessions(client_map);
+    mds->sessionmap.replay_open_sessions(client_map);
     assert(mds->sessionmap.get_version() == cmapv);
-    mds->sessionmap.set_projected(mds->sessionmap.get_version());
   }
   update_segment();
 }
@@ -1878,7 +1856,7 @@ void ETableServer::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void ETableServer::decode(bufferlist::iterator &bl)
+void ETableServer::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
@@ -1974,7 +1952,7 @@ void ETableClient::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void ETableClient::decode(bufferlist::iterator &bl)
+void ETableClient::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
@@ -2062,7 +2040,7 @@ void EUpdate::encode(bufferlist &bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
  
-void EUpdate::decode(bufferlist::iterator &bl)
+void EUpdate::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(4, 4, 4, bl);
   if (struct_v >= 2)
@@ -2127,13 +2105,11 @@ void EUpdate::replay(MDSRank *mds)
 	       << " < " << cmapv << dendl;
       // open client sessions?
       map<client_t,entity_inst_t> cm;
-      bufferlist::iterator blp = client_map.begin();
+      auto blp = client_map.cbegin();
       using ceph::decode;
       decode(cm, blp);
-      mds->sessionmap.open_sessions(cm);
-
+      mds->sessionmap.replay_open_sessions(cm);
       assert(mds->sessionmap.get_version() == cmapv);
-      mds->sessionmap.set_projected(mds->sessionmap.get_version());
     }
   }
   update_segment();
@@ -2152,7 +2128,7 @@ void EOpen::encode(bufferlist &bl, uint64_t features) const {
   ENCODE_FINISH(bl);
 } 
 
-void EOpen::decode(bufferlist::iterator &bl) {
+void EOpen::decode(bufferlist::const_iterator &bl) {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
     decode(stamp, bl);
@@ -2235,7 +2211,7 @@ void ECommitted::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 } 
 
-void ECommitted::decode(bufferlist::iterator& bl)
+void ECommitted::decode(bufferlist::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
@@ -2262,25 +2238,28 @@ void ECommitted::generate_test_instances(list<ECommitted*>& ls)
 
 void link_rollback::encode(bufferlist &bl) const
 {
-  ENCODE_START(2, 2, bl);
+  ENCODE_START(3, 2, bl);
   encode(reqid, bl);
   encode(ino, bl);
   encode(was_inc, bl);
   encode(old_ctime, bl);
   encode(old_dir_mtime, bl);
   encode(old_dir_rctime, bl);
+  encode(snapbl, bl);
   ENCODE_FINISH(bl);
 }
 
-void link_rollback::decode(bufferlist::iterator &bl)
+void link_rollback::decode(bufferlist::const_iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(3, 2, 2, bl);
   decode(reqid, bl);
   decode(ino, bl);
   decode(was_inc, bl);
   decode(old_ctime, bl);
   decode(old_dir_mtime, bl);
   decode(old_dir_rctime, bl);
+  if (struct_v >= 3)
+    decode(snapbl, bl);
   DECODE_FINISH(bl);
 }
 
@@ -2301,23 +2280,26 @@ void link_rollback::generate_test_instances(list<link_rollback*>& ls)
 
 void rmdir_rollback::encode(bufferlist& bl) const
 {
-  ENCODE_START(2, 2, bl);
+  ENCODE_START(3, 2, bl);
   encode(reqid, bl);
   encode(src_dir, bl);
   encode(src_dname, bl);
   encode(dest_dir, bl);
   encode(dest_dname, bl);
+  encode(snapbl, bl);
   ENCODE_FINISH(bl);
 }
 
-void rmdir_rollback::decode(bufferlist::iterator& bl)
+void rmdir_rollback::decode(bufferlist::const_iterator& bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(3, 2, 2, bl);
   decode(reqid, bl);
   decode(src_dir, bl);
   decode(src_dname, bl);
   decode(dest_dir, bl);
   decode(dest_dname, bl);
+  if (struct_v >= 3)
+    decode(snapbl, bl);
   DECODE_FINISH(bl);
 }
 
@@ -2349,7 +2331,7 @@ void rename_rollback::drec::encode(bufferlist &bl) const
   ENCODE_FINISH(bl);
 }
 
-void rename_rollback::drec::decode(bufferlist::iterator &bl)
+void rename_rollback::drec::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
   decode(dirfrag, bl);
@@ -2395,23 +2377,29 @@ void rename_rollback::drec::generate_test_instances(list<drec*>& ls)
 
 void rename_rollback::encode(bufferlist &bl) const
 {
-  ENCODE_START(2, 2, bl);
+  ENCODE_START(3, 2, bl);
   encode(reqid, bl);
   encode(orig_src, bl);
   encode(orig_dest, bl);
   encode(stray, bl);
   encode(ctime, bl);
+  encode(srci_snapbl, bl);
+  encode(desti_snapbl, bl);
   ENCODE_FINISH(bl);
 }
 
-void rename_rollback::decode(bufferlist::iterator &bl)
+void rename_rollback::decode(bufferlist::const_iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(3, 2, 2, bl);
   decode(reqid, bl);
   decode(orig_src, bl);
   decode(orig_dest, bl);
   decode(stray, bl);
   decode(ctime, bl);
+  if (struct_v >= 3) {
+    decode(srci_snapbl, bl);
+    decode(desti_snapbl, bl);
+  }
   DECODE_FINISH(bl);
 }
 
@@ -2452,7 +2440,7 @@ void ESlaveUpdate::encode(bufferlist &bl, uint64_t features) const
   ENCODE_FINISH(bl);
 } 
 
-void ESlaveUpdate::decode(bufferlist::iterator &bl)
+void ESlaveUpdate::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
@@ -2542,7 +2530,7 @@ void ESubtreeMap::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
  
-void ESubtreeMap::decode(bufferlist::iterator &bl)
+void ESubtreeMap::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(6, 5, 5, bl);
   if (struct_v >= 2)
@@ -2786,7 +2774,7 @@ void EFragment::encode(bufferlist &bl, uint64_t features) const {
   ENCODE_FINISH(bl);
 }
 
-void EFragment::decode(bufferlist::iterator &bl) {
+void EFragment::decode(bufferlist::const_iterator &bl) {
   DECODE_START_LEGACY_COMPAT_LEN(5, 4, 4, bl);
   if (struct_v >= 2)
     decode(stamp, bl);
@@ -2830,7 +2818,7 @@ void dirfrag_rollback::encode(bufferlist &bl) const
   ENCODE_FINISH(bl);
 }
 
-void dirfrag_rollback::decode(bufferlist::iterator &bl)
+void dirfrag_rollback::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START(1, bl);
   decode(fnode, bl);
@@ -2878,7 +2866,7 @@ void EExport::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void EExport::decode(bufferlist::iterator &bl)
+void EExport::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
@@ -2956,10 +2944,10 @@ void EImportStart::replay(MDSRank *mds)
     dout(10) << "EImportStart.replay sessionmap " << mds->sessionmap.get_version() 
 	     << " < " << cmapv << dendl;
     map<client_t,entity_inst_t> cm;
-    bufferlist::iterator blp = client_map.begin();
+    auto blp = client_map.cbegin();
     using ceph::decode;
     decode(cm, blp);
-    mds->sessionmap.open_sessions(cm);
+    mds->sessionmap.replay_open_sessions(cm);
     if (mds->sessionmap.get_version() != cmapv)
     {
       derr << "sessionmap version " << mds->sessionmap.get_version()
@@ -2968,7 +2956,6 @@ void EImportStart::replay(MDSRank *mds)
       mds->damaged();
       ceph_abort();  // Should be unreachable because damaged() calls respawn()
     }
-    mds->sessionmap.set_projected(mds->sessionmap.get_version());
   }
   update_segment();
 }
@@ -2985,7 +2972,7 @@ void EImportStart::encode(bufferlist &bl, uint64_t features) const {
   ENCODE_FINISH(bl);
 }
 
-void EImportStart::decode(bufferlist::iterator &bl) {
+void EImportStart::decode(bufferlist::const_iterator &bl) {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
     decode(stamp, bl);
@@ -3053,7 +3040,7 @@ void EImportFinish::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void EImportFinish::decode(bufferlist::iterator &bl)
+void EImportFinish::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 3, 3, bl);
   if (struct_v >= 2)
@@ -3086,7 +3073,7 @@ void EResetJournal::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
  
-void EResetJournal::decode(bufferlist::iterator &bl)
+void EResetJournal::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
   decode(stamp, bl);
@@ -3136,7 +3123,7 @@ void ENoOp::encode(bufferlist &bl, uint64_t features) const
 }
 
 
-void ENoOp::decode(bufferlist::iterator &bl)
+void ENoOp::decode(bufferlist::const_iterator &bl)
 {
   DECODE_START(2, bl);
   decode(pad_size, bl);

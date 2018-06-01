@@ -19,7 +19,7 @@ class RGWOp_ZoneGroupMap_Get : public RGWRESTOp {
   RGWZoneGroupMap zonegroup_map;
   bool old_format;
 public:
-  RGWOp_ZoneGroupMap_Get(bool _old_format):old_format(_old_format) {}
+  explicit RGWOp_ZoneGroupMap_Get(bool _old_format):old_format(_old_format) {}
   ~RGWOp_ZoneGroupMap_Get() override {}
 
   int verify_permission() override {
@@ -27,7 +27,7 @@ public:
   }
   void execute() override;
   void send_response() override;
-  const string name() override {
+  const char* name() const override {
     if (old_format) {
       return "get_region_map";
     } else {
@@ -44,12 +44,12 @@ public:
   int check_caps(RGWUserCaps& caps) {
     return caps.check_cap("admin", RGW_CAP_READ);
   }
-  int verify_permission() {
+  int verify_permission() override {
     return check_caps(s->user->caps);
   }
-  void execute() {} /* store already has the info we need, just need to send response */
-  void send_response();
-  const string name() {
+  void execute() override {} /* store already has the info we need, just need to send response */
+  void send_response() override ;
+  const char* name() const override {
     return "get_zone_config";
   }
 };

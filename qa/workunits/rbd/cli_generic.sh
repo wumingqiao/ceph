@@ -1,5 +1,7 @@
 #!/bin/sh -ex
 
+export RBD_FORCE_ALLOW_V1=1
+
 # make sure rbd pool is EMPTY.. this is a test script!!
 rbd ls | wc -l | grep -v '^0$' && echo "nonempty rbd pool, aborting!  run this script on an empty test cluster only." && exit 1
 
@@ -42,8 +44,8 @@ test_others() {
     rbd export testimg1 /tmp/img3
 
     # info
-    rbd info testimg1 | grep 'size 128 MB'
-    rbd info --snap=snap1 testimg1 | grep 'size 256 MB'
+    rbd info testimg1 | grep 'size 128 MiB'
+    rbd info --snap=snap1 testimg1 | grep 'size 256 MiB'
 
     # export-diff
     rm -rf /tmp/diff-testimg1-1 /tmp/diff-testimg1-2
@@ -56,10 +58,10 @@ test_others() {
     rbd import-diff --sparse-size 8K /tmp/diff-testimg1-2 testimg-diff1
 
     # info
-    rbd info testimg1 | grep 'size 128 MB'
-    rbd info --snap=snap1 testimg1 | grep 'size 256 MB'
-    rbd info testimg-diff1 | grep 'size 128 MB'
-    rbd info --snap=snap1 testimg-diff1 | grep 'size 256 MB'
+    rbd info testimg1 | grep 'size 128 MiB'
+    rbd info --snap=snap1 testimg1 | grep 'size 256 MiB'
+    rbd info testimg-diff1 | grep 'size 128 MiB'
+    rbd info --snap=snap1 testimg-diff1 | grep 'size 256 MiB'
 
     # make copies
     rbd copy testimg1 --snap=snap1 testimg2
@@ -68,16 +70,16 @@ test_others() {
     rbd copy testimg-diff1 --sparse-size 768K testimg-diff3
 
     # verify the result
-    rbd info testimg2 | grep 'size 256 MB'
-    rbd info testimg3 | grep 'size 128 MB'
-    rbd info testimg-diff2 | grep 'size 256 MB'
-    rbd info testimg-diff3 | grep 'size 128 MB'
+    rbd info testimg2 | grep 'size 256 MiB'
+    rbd info testimg3 | grep 'size 128 MiB'
+    rbd info testimg-diff2 | grep 'size 256 MiB'
+    rbd info testimg-diff3 | grep 'size 128 MiB'
 
     # deep copies
     rbd deep copy testimg1 testimg4
     rbd deep copy testimg1 --snap=snap1 testimg5
-    rbd info testimg4 | grep 'size 128 MB'
-    rbd info testimg5 | grep 'size 256 MB'
+    rbd info testimg4 | grep 'size 128 MiB'
+    rbd info testimg5 | grep 'size 256 MiB'
     rbd snap ls testimg4 | grep -v 'SNAPID' | wc -l | grep 1
     rbd snap ls testimg4 | grep '.*snap1.*'
 
@@ -96,8 +98,8 @@ test_others() {
     # rollback
     rbd snap rollback --snap=snap1 testimg1
     rbd snap rollback --snap=snap1 testimg-diff1
-    rbd info testimg1 | grep 'size 256 MB'
-    rbd info testimg-diff1 | grep 'size 256 MB'
+    rbd info testimg1 | grep 'size 256 MiB'
+    rbd info testimg-diff1 | grep 'size 256 MiB'
     rbd export testimg1 /tmp/img1.snap1
     rbd export testimg-diff1 /tmp/img-diff1.snap1
     cmp /tmp/img2 /tmp/img1.snap1
@@ -156,8 +158,8 @@ test_ls() {
     rbd ls | grep test2
     rbd ls | wc -l | grep 2
     # look for fields in output of ls -l without worrying about space
-    rbd ls -l | grep 'test1.*1M.*1'
-    rbd ls -l | grep 'test2.*1M.*1'
+    rbd ls -l | grep 'test1.*1 MiB.*1'
+    rbd ls -l | grep 'test2.*1 MiB.*1'
 
     rbd rm test1
     rbd rm test2
@@ -167,8 +169,8 @@ test_ls() {
     rbd ls | grep test1
     rbd ls | grep test2
     rbd ls | wc -l | grep 2
-    rbd ls -l | grep 'test1.*1M.*2'
-    rbd ls -l | grep 'test2.*1M.*2'
+    rbd ls -l | grep 'test1.*1 MiB.*2'
+    rbd ls -l | grep 'test2.*1 MiB.*2'
 
     rbd rm test1
     rbd rm test2
@@ -178,8 +180,8 @@ test_ls() {
     rbd ls | grep test1
     rbd ls | grep test2
     rbd ls | wc -l | grep 2
-    rbd ls -l | grep 'test1.*1M.*2'
-    rbd ls -l | grep 'test2.*1M.*1'
+    rbd ls -l | grep 'test1.*1 MiB.*2'
+    rbd ls -l | grep 'test2.*1 MiB.*1'
     remove_images
 
     # test that many images can be shown by ls
@@ -419,7 +421,7 @@ test_trash() {
 
     rbd trash mv test2
     ID=`rbd trash ls | cut -d ' ' -f 1`
-    rbd info --image-id $ID | grep "rbd image '$ID'"
+    rbd info --image-id $ID | grep "rbd image 'test2'"
 
     rbd trash restore $ID
     rbd ls | grep test2
@@ -493,13 +495,30 @@ test_deep_copy_clone() {
     rbd clone testimg1@snap1 testimg2
     rbd snap create testimg2@snap2
     rbd deep copy testimg2 testimg3
-    rbd info testimg3 | grep 'size 256 MB'
+    rbd info testimg3 | grep 'size 256 MiB'
+    rbd info testimg3 | grep 'parent: rbd/testimg1@snap1'
     rbd snap ls testimg3 | grep -v 'SNAPID' | wc -l | grep 1
     rbd snap ls testimg3 | grep '.*snap2.*'
     rbd info testimg2 | grep 'features:.*deep-flatten' || rbd snap rm testimg2@snap2
     rbd info testimg3 | grep 'features:.*deep-flatten' || rbd snap rm testimg3@snap2
     rbd flatten testimg2
     rbd flatten testimg3
+    rbd snap unprotect testimg1@snap1
+    rbd snap purge testimg2
+    rbd snap purge testimg3
+    rbd rm testimg2
+    rbd rm testimg3
+
+    rbd snap protect testimg1@snap1
+    rbd clone testimg1@snap1 testimg2
+    rbd snap create testimg2@snap2
+    rbd deep copy --flatten testimg2 testimg3
+    rbd info testimg3 | grep 'size 256 MiB'
+    rbd info testimg3 | grep -v 'parent:'
+    rbd snap ls testimg3 | grep -v 'SNAPID' | wc -l | grep 1
+    rbd snap ls testimg3 | grep '.*snap2.*'
+    rbd info testimg2 | grep 'features:.*deep-flatten' || rbd snap rm testimg2@snap2
+    rbd flatten testimg2
     rbd snap unprotect testimg1@snap1
 
     remove_images
@@ -540,6 +559,58 @@ test_clone_v2() {
     rbd rm test2
 }
 
+test_thick_provision() {
+    echo "testing thick provision..."
+    remove_images
+
+    # Try to create small and large thick-pro image and
+    # check actual size. (64M and 4G)
+
+    # Small thick-pro image test
+    rbd create $RBD_CREATE_ARGS --thick-provision -s 64M test1
+    count=0
+    ret=""
+    while [ $count -lt 10 ]
+    do
+        rbd du|grep test1|tr -s " "|cut -d " " -f 4-5|grep '^64 MiB' && ret=$?
+        if [ "$ret" = "0" ]
+        then
+            break;
+        fi
+        count=`expr $count + 1`
+        sleep 2
+    done
+    rbd du
+    if [ "$ret" != "0" ]
+    then
+        exit 1
+    fi
+    rbd rm test1
+    rbd ls | grep test1 | wc -l | grep '^0$'
+
+    # Large thick-pro image test
+    rbd create $RBD_CREATE_ARGS --thick-provision -s 4G test1
+    count=0
+    ret=""
+    while [ $count -lt 10 ]
+    do
+        rbd du|grep test1|tr -s " "|cut -d " " -f 4-5|grep '^4 GiB' && ret=$?
+        if [ "$ret" = "0" ]
+        then
+            break;
+        fi
+        count=`expr $count + 1`
+        sleep 2
+    done
+    rbd du
+    if [ "$ret" != "0" ]
+    then
+        exit 1
+    fi
+    rbd rm test1
+    rbd ls | grep test1 | wc -l | grep '^0$'
+}
+
 test_pool_image_args
 test_rename
 test_ls
@@ -547,6 +618,7 @@ test_remove
 RBD_CREATE_ARGS=""
 test_others
 test_locking
+test_thick_provision
 RBD_CREATE_ARGS="--image-format 2"
 test_others
 test_locking
@@ -555,5 +627,6 @@ test_trash
 test_purge
 test_deep_copy_clone
 test_clone_v2
+test_thick_provision
 
 echo OK

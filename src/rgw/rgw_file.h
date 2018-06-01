@@ -129,7 +129,7 @@ namespace rgw {
       ENCODE_FINISH(bl);
     }
 
-    void decode(bufferlist::iterator& bl) {
+    void decode(bufferlist::const_iterator& bl) {
       DECODE_START(2, bl);
       decode(fh_hk.bucket, bl);
       decode(fh_hk.object, bl);
@@ -261,7 +261,7 @@ namespace rgw {
     friend class RGWLibFS;
 
   private:
-    RGWFileHandle(RGWLibFS* _fs)
+    explicit RGWFileHandle(RGWLibFS* _fs)
       : fs(_fs), bucket(nullptr), parent(nullptr), variant_type{directory()},
 	depth(0), flags(FLAG_NONE)
       {
@@ -633,7 +633,7 @@ namespace rgw {
       ENCODE_FINISH(bl);
     }
 
-    void decode(bufferlist::iterator& bl) {
+    void decode(bufferlist::const_iterator& bl) {
       DECODE_START(2, bl);
       uint32_t fh_type;
       decode(fh_type, bl);
@@ -819,7 +819,7 @@ namespace rgw {
     {
       RGWFileHandle& rgw_fh;
 
-      WriteCompletion(RGWFileHandle& _fh) : rgw_fh(_fh) {
+      explicit WriteCompletion(RGWFileHandle& _fh) : rgw_fh(_fh) {
 	rgw_fh.get_fs()->ref(&rgw_fh);
       }
 
@@ -2022,7 +2022,7 @@ public:
     RGWGetObj::end = UINT64_MAX;
   }
 
-  const string name() override { return "stat_obj"; }
+  const char* name() const override { return "stat_obj"; }
   RGWOpType get_type() override { return RGW_OP_STAT_OBJ; }
 
   real_time get_mtime() const {
@@ -2543,6 +2543,49 @@ public:
   void send_response() override {}
 
 }; /* RGWSetAttrsRequest */
+
+/*
+ * Send request to get the rados cluster stats
+ */
+class RGWGetClusterStatReq : public RGWLibRequest,
+        public RGWGetClusterStat {
+public:
+  struct rados_cluster_stat_t& stats_req;
+  RGWGetClusterStatReq(CephContext* _cct,RGWUserInfo *_user,
+                       rados_cluster_stat_t& _stats):
+  RGWLibRequest(_cct, _user), stats_req(_stats){
+    op = this;
+  }
+
+  int op_init() override {
+    // assign store, s, and dialect_handler
+    RGWObjectCtx* rados_ctx
+      = static_cast<RGWObjectCtx*>(get_state()->obj_ctx);
+    // framework promises to call op_init after parent init
+    assert(rados_ctx);
+    RGWOp::init(rados_ctx->store, get_state(), this);
+    op = this; // assign self as op: REQUIRED
+    return 0;
+  }
+
+  int header_init() override {
+    struct req_state* s = get_state();
+    s->info.method = "GET";
+    s->op = OP_GET;
+    s->user = user;
+    return 0;
+  }
+
+  int get_params() override { return 0; }
+  bool only_bucket() override { return false; }
+  void send_response() override {
+    stats_req.kb = stats_op.kb;
+    stats_req.kb_avail = stats_op.kb_avail;
+    stats_req.kb_used = stats_op.kb_used;
+    stats_req.num_objects = stats_op.num_objects;
+  }
+}; /* RGWGetClusterStatReq */
+
 
 } /* namespace rgw */
 

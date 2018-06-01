@@ -46,7 +46,8 @@ int main(int argc, char **argv) {
   argv_to_vec(argc, (const char **)argv, args);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf->apply_changes(NULL);
 
@@ -79,7 +80,7 @@ int main(int argc, char **argv) {
     assert(!store->mount());
     ch = store->create_new_collection(coll);
     t.create_collection(coll, 0);
-    store->apply_transaction(ch, std::move(t));
+    store->queue_transaction(ch, std::move(t));
   } else {
     assert(!store->mount());
     ch = store->open_collection(coll);

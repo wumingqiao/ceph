@@ -49,7 +49,7 @@ template <typename I>
 bool EnableFeaturesRequest<I>::should_complete(int r) {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
-  ldout(cct, 20) << this << " " << __func__ << "r=" << r << dendl;
+  ldout(cct, 20) << this << " " << __func__ << " r=" << r << dendl;
 
   if (r < 0) {
     lderr(cct) << "encountered error: " << cpp_strerror(r) << dendl;
@@ -147,7 +147,7 @@ Context *EnableFeaturesRequest<I>::handle_get_mirror_mode(int *result) {
 
   cls::rbd::MirrorMode mirror_mode = cls::rbd::MIRROR_MODE_DISABLED;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::mirror_mode_get_finish(&it, &mirror_mode);
   } else if (*result == -ENOENT) {
     *result = 0;

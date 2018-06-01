@@ -929,7 +929,7 @@ public:
     return *this;
   }
 
-  void buffer::ptr::swap(ptr& other)
+  void buffer::ptr::swap(ptr& other) noexcept
   {
     raw *r = _raw;
     unsigned o = _off;
@@ -1506,7 +1506,7 @@ public:
 
   // -- buffer::list --
 
-  buffer::list::list(list&& other)
+  buffer::list::list(list&& other) noexcept
     : _buffers(std::move(other._buffers)),
       _len(other._len),
       _memcopy_count(other._memcopy_count),
@@ -1515,7 +1515,7 @@ public:
     other.clear();
   }
 
-  void buffer::list::swap(list& other)
+  void buffer::list::swap(list& other) noexcept
   {
     std::swap(_len, other._len);
     std::swap(_memcopy_count, other._memcopy_count);
@@ -1839,24 +1839,11 @@ public:
     bl.last_p = bl.begin();
   }
 
-  void buffer::list::claim_prepend(list& bl, unsigned int flags)
-  {
-    // steal the other guy's buffers
-    _len += bl._len;
-    if (!(flags & CLAIM_ALLOW_NONSHAREABLE))
-      bl.make_shareable();
-    _buffers.splice(_buffers.begin(), bl._buffers );
-    bl._len = 0;
-    bl.last_p = bl.begin();
-    // we modified _buffers
-    last_p = begin();
-  }
-
   void buffer::list::claim_append_piecewise(list& bl)
   {
     // steal the other guy's buffers
     for (std::list<buffer::ptr>::const_iterator i = bl.buffers().begin();
-        i != bl.buffers().end(); i++) {
+        i != bl.buffers().end(); ++i) {
       append(*i, 0, i->length());
     }
     bl.clear();
@@ -2362,8 +2349,7 @@ static int do_writev(int fd, struct iovec *vec, uint64_t offset, unsigned veclen
 #else
     r = ::lseek64(fd, offset, SEEK_SET);
     if (r != offset) {
-      r = -errno;
-      return r;
+      return -errno;
     }
     r = ::writev(fd, vec, veclen);
 #endif

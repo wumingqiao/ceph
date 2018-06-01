@@ -12,9 +12,11 @@
 #include "common/errno.h"
 #include "common/Throttle.h"
 #include "common/event_socket.h"
-#include "cls/lock/cls_lock_client.h"
+#include "common/perf_counters.h"
+#include "osdc/Striper.h"
 #include "include/stringify.h"
 
+#include "cls/lock/cls_lock_client.h"
 #include "cls/rbd/cls_rbd.h"
 #include "cls/rbd/cls_rbd_types.h"
 #include "cls/rbd/cls_rbd_client.h"
@@ -40,6 +42,8 @@
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/ImageRequest.h"
 #include "librbd/io/ImageRequestWQ.h"
+#include "librbd/io/ObjectDispatcher.h"
+#include "librbd/io/ObjectDispatchSpec.h"
 #include "librbd/io/ObjectRequest.h"
 #include "librbd/io/ReadResult.h"
 #include "librbd/journal/Types.h"
@@ -307,6 +311,7 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     {RBD_IMAGE_OPTION_FEATURES_SET, UINT64},
     {RBD_IMAGE_OPTION_FEATURES_CLEAR, UINT64},
     {RBD_IMAGE_OPTION_DATA_POOL, STR},
+    {RBD_IMAGE_OPTION_FLATTEN, UINT64},
   };
 
   std::string image_option_name(int optname) {
@@ -333,6 +338,8 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
       return "features_clear";
     case RBD_IMAGE_OPTION_DATA_POOL:
       return "data_pool";
+    case RBD_IMAGE_OPTION_FLATTEN:
+      return "flatten";
     default:
       return "unknown (" + stringify(optname) + ")";
     }
@@ -525,7 +532,7 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
 
     // old format images are in a tmap
     if (bl.length()) {
-      bufferlist::iterator p = bl.begin();
+      auto p = bl.cbegin();
       bufferlist header;
       map<string,bufferlist> m;
       decode(header, p);
@@ -838,6 +845,12 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     }
 
     CephContext *cct = (CephContext *)io_ctx.cct();
+    uint64_t flatten;
+    if (opts.get(RBD_IMAGE_OPTION_FLATTEN, &flatten) == 0) {
+      lderr(cct) << "create does not support 'flatten' image option" << dendl;
+      return -EINVAL;
+    }
+
     ldout(cct, 10) << __func__ << " name=" << image_name << ", "
 		   << "id= " << id << ", "
 		   << "size=" << size << ", opts=" << opts << dendl;
@@ -869,6 +882,11 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     }
 
     if (old_format) {
+      if ( !getenv("RBD_FORCE_ALLOW_V1") ) {
+        lderr(cct) << "Format 1 image creation unsupported. " << dendl;
+        return -EINVAL;
+      }
+      lderr(cct) << "Forced V1 image creation. " << dendl;
       r = create_v1(io_ctx, image_name.c_str(), size, order);
     } else {
       ThreadPool *thread_pool;
@@ -918,6 +936,12 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     CephContext *cct = (CephContext *)p_ioctx.cct();
     if (p_snap_name == NULL) {
       lderr(cct) << "image to be cloned must be a snapshot" << dendl;
+      return -EINVAL;
+    }
+
+    uint64_t flatten;
+    if (c_opts.get(RBD_IMAGE_OPTION_FLATTEN, &flatten) == 0) {
+      lderr(cct) << "clone does not support 'flatten' image option" << dendl;
       return -EINVAL;
     }
 
@@ -1719,6 +1743,12 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
 	   ImageOptions& opts, ProgressContext &prog_ctx, size_t sparse_size)
   {
     CephContext *cct = (CephContext *)dest_md_ctx.cct();
+    uint64_t flatten;
+    if (opts.get(RBD_IMAGE_OPTION_FLATTEN, &flatten) == 0) {
+      lderr(cct) << "copy does not support 'flatten' image option" << dendl;
+      return -EINVAL;
+    }
+
     ldout(cct, 20) << "copy " << src->name
 		   << (src->snap_name.length() ? "@" + src->snap_name : "")
 		   << " -> " << destname << " opts = " << opts << dendl;
@@ -1961,32 +1991,6 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     if (r >= 0)
       prog_ctx.update_progress(src_size, src_size);
     return r;
-  }
-
-  int snap_set(ImageCtx *ictx, const cls::rbd::SnapshotNamespace &snap_namespace,
-	       const char *snap_name)
-  {
-    ldout(ictx->cct, 20) << "snap_set " << ictx << " snap = "
-			 << (snap_name ? snap_name : "NULL") << dendl;
-
-    // ignore return value, since we may be set to a non-existent
-    // snapshot and the user is trying to fix that
-    ictx->state->refresh_if_required();
-
-    C_SaferCond ctx;
-    std::string name(snap_name == nullptr ? "" : snap_name);
-    ictx->state->snap_set(snap_namespace, name, &ctx);
-
-    int r = ctx.wait();
-    if (r < 0) {
-      if (r != -ENOENT) {
-        lderr(ictx->cct) << "failed to " << (name.empty() ? "un" : "") << "set "
-                         << "snapshot: " << cpp_strerror(r) << dendl;
-      }
-      return r;
-    }
-
-    return 0;
   }
 
   int list_lockers(ImageCtx *ictx,
@@ -2245,8 +2249,12 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
       return r;
     }
 
-    RWLock::RLocker owner_locker(ictx->owner_lock);
-    r = ictx->invalidate_cache(false);
+    C_SaferCond ctx;
+    {
+      RWLock::RLocker owner_locker(ictx->owner_lock);
+      ictx->io_object_dispatcher->invalidate_cache(&ctx);
+    }
+    r = ctx.wait();
     ictx->perfcounter->inc(l_librbd_invalidate_cache);
     return r;
   }
@@ -2299,10 +2307,18 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     object_t oid;
     uint64_t offset;
     uint64_t length;
+
+    bufferlist read_data;
+    io::ExtentMap extent_map;
+
     C_RBD_Readahead(ImageCtx *ictx, object_t oid, uint64_t offset, uint64_t length)
-      : ictx(ictx), oid(oid), offset(offset), length(length) { }
+      : ictx(ictx), oid(oid), offset(offset), length(length) {
+      ictx->readahead.inc_pending();
+    }
+
     void finish(int r) override {
-      ldout(ictx->cct, 20) << "C_RBD_Readahead on " << oid << ": " << offset << "+" << length << dendl;
+      ldout(ictx->cct, 20) << "C_RBD_Readahead on " << oid << ": "
+                           << offset << "~" << length << dendl;
       ictx->readahead.dec_pending();
     }
   };
@@ -2316,7 +2332,7 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
 	 ++p) {
       total_bytes += p->second;
     }
-    
+
     ictx->md_lock.get_write();
     bool abort = ictx->readahead_disable_after_bytes != 0 &&
       ictx->total_bytes_read > ictx->readahead_disable_after_bytes;
@@ -2327,9 +2343,10 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
     ictx->total_bytes_read += total_bytes;
     ictx->snap_lock.get_read();
     uint64_t image_size = ictx->get_image_size(ictx->snap_id);
+    auto snap_id = ictx->snap_id;
     ictx->snap_lock.put_read();
     ictx->md_lock.put_write();
- 
+
     pair<uint64_t, uint64_t> readahead_extent = ictx->readahead.update(image_extents, image_size);
     uint64_t readahead_offset = readahead_extent.first;
     uint64_t readahead_length = readahead_extent.second;
@@ -2343,11 +2360,13 @@ bool compare_by_name(const child_info_t& c1, const child_info_t& c2)
 	for (vector<ObjectExtent>::iterator q = p->second.begin(); q != p->second.end(); ++q) {
 	  ldout(ictx->cct, 20) << "(readahead) oid " << q->oid << " " << q->offset << "~" << q->length << dendl;
 
-	  Context *req_comp = new C_RBD_Readahead(ictx, q->oid, q->offset, q->length);
-	  ictx->readahead.inc_pending();
-	  ictx->aio_read_from_cache(q->oid, q->objectno, NULL,
-				    q->length, q->offset,
-				    req_comp, 0, nullptr);
+	  auto req_comp = new C_RBD_Readahead(ictx, q->oid, q->offset,
+                                              q->length);
+          auto req = io::ObjectDispatchSpec::create_read(
+            ictx, io::OBJECT_DISPATCH_LAYER_NONE, q->oid.name, q->objectno,
+            q->offset, q->length, snap_id, 0, {}, &req_comp->read_data,
+            &req_comp->extent_map, req_comp);
+          req->send();
 	}
       }
       ictx->perfcounter->inc(l_librbd_readahead);

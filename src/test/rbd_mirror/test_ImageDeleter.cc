@@ -26,6 +26,7 @@
 #include "librbd/Journal.h"
 #include "librbd/internal.h"
 #include "librbd/Utils.h"
+#include "librbd/api/Image.h"
 #include "librbd/api/Mirror.h"
 #include "librbd/journal/DisabledPolicy.h"
 #include "test/rbd_mirror/test_fixture.h"
@@ -65,7 +66,8 @@ public:
 
     m_local_image_id = librbd::util::generate_image_id(m_local_io_ctx);
     librbd::ImageOptions image_opts;
-    image_opts.set(RBD_IMAGE_OPTION_FEATURES, RBD_FEATURES_ALL);
+    image_opts.set(RBD_IMAGE_OPTION_FEATURES,
+                   (RBD_FEATURES_ALL & ~RBD_FEATURES_IMPLICIT_ENABLE));
     EXPECT_EQ(0, librbd::create(m_local_io_ctx, m_image_name, m_local_image_id,
                                 1 << 20, image_opts, GLOBAL_IMAGE_ID,
                                 m_remote_mirror_uuid, true));
@@ -185,8 +187,8 @@ public:
                    cls::rbd::UserSnapshotNamespace(), "snap1"));
     EXPECT_EQ(0, ictx->operations->snap_protect(
                    cls::rbd::UserSnapshotNamespace(), "snap1"));
-    EXPECT_EQ(0, librbd::snap_set(ictx, cls::rbd::UserSnapshotNamespace(),
-                                  "snap1"));
+    EXPECT_EQ(0, librbd::api::Image<>::snap_set(
+                   ictx, cls::rbd::UserSnapshotNamespace(), "snap1"));
 
     std::string clone_id = librbd::util::generate_image_id(m_local_io_ctx);
     librbd::ImageOptions clone_opts;

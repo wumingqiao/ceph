@@ -67,7 +67,7 @@ using namespace std;
 #define dout_subsys ceph_subsys_
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, get_name())
-static ostream& _prefix(std::ostream *_dout, string n) {
+static ostream& _prefix(std::ostream *_dout, const string &n) {
   return *_dout << " stub(" << n << ") ";
 }
 
@@ -514,7 +514,7 @@ class OSDStub : public TestStub
 	       << " epoch " << pool_epoch << dendl;
 
       for (ps_t ps = 0; ps < pool.get_pg_num(); ++ps) {
-	pg_t pgid(ps, pool_id, -1);
+	pg_t pgid(ps, pool_id);
 	pg_t parent;
 	dout(20) << __func__
 		 << " pgid " << pgid << " parent " << parent << dendl;
@@ -703,7 +703,8 @@ class OSDStub : public TestStub
     int seq = 0;
     for (; num_entries > 0; --num_entries) {
       LogEntry e;
-      e.who = messenger->get_myinst();
+      e.rank = messenger->get_myname();
+      e.addrs.v.push_back(messenger->get_myaddr());
       e.stamp = now;
       e.seq = seq++;
       e.prio = CLOG_DEBUG;
@@ -819,7 +820,7 @@ class OSDStub : public TestStub
 	dout(5) << __func__
 		<< " full epoch " << start_full << dendl;
 	bufferlist &bl = rit->second;
-	bufferlist::iterator p = bl.begin();
+	auto p = bl.cbegin();
 	osdmap.decode(p);
       }
     }
@@ -835,7 +836,7 @@ class OSDStub : public TestStub
 	       << " on full epoch " << start_full << dendl;
       OSDMap::Incremental inc;
       bufferlist &bl = it->second;
-      bufferlist::iterator p = bl.begin();
+      auto p = bl.cbegin();
       inc.decode(p);
 
       int err = osdmap.apply_incremental(inc);
@@ -897,11 +898,7 @@ class OSDStub : public TestStub
 
   bool ms_handle_reset(Connection *con) override {
     dout(1) << __func__ << dendl;
-    Session *session = (Session *)con->get_priv();
-    if (!session)
-      return false;
-    session->put();
-    return true;
+    return con->get_priv().get();
   }
 
   bool ms_handle_refused(Connection *con) override {
@@ -995,14 +992,13 @@ int get_id_interval(int &first, int &last, string &str)
 
 int main(int argc, const char *argv[])
 {
-  vector<const char*> def_args;
   vector<const char*> args;
   our_name = argv[0];
   argv_to_vec(argc, argv, args);
 
-  auto cct = global_init(&def_args, args,
+  auto cct = global_init(NULL, args,
 			 CEPH_ENTITY_TYPE_OSD, CODE_ENVIRONMENT_UTILITY,
-			 0);
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
 
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf->apply_changes(NULL);

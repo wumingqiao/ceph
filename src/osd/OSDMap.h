@@ -76,7 +76,7 @@ struct osd_info_t {
 
   void dump(Formatter *f) const;
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   static void generate_test_instances(list<osd_info_t*>& o);
 };
 WRITE_CLASS_ENCODER(osd_info_t)
@@ -95,7 +95,7 @@ struct osd_xinfo_t {
 
   void dump(Formatter *f) const;
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   static void generate_test_instances(list<osd_xinfo_t*>& o);
 };
 WRITE_CLASS_ENCODER(osd_xinfo_t)
@@ -118,7 +118,7 @@ struct PGTempMap {
       bl.append((char*)p.second, (*p.second + 1) * sizeof(int32_t));
     }
   }
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     using ceph::decode;
     data.clear();
     map.clear();
@@ -126,7 +126,7 @@ struct PGTempMap {
     decode(n, p);
     if (!n)
       return;
-    bufferlist::iterator pstart = p;
+    auto pstart = p;
     size_t start_off = pstart.get_off();
     vector<pair<pg_t,size_t>> offsets;
     offsets.resize(n);
@@ -153,7 +153,7 @@ struct PGTempMap {
   void rebuild() {
     bufferlist bl;
     encode(bl);
-    auto p = bl.begin();
+    auto p = std::cbegin(bl);
     decode(p);
   }
   friend bool operator==(const PGTempMap& l, const PGTempMap& r) {
@@ -260,7 +260,7 @@ struct PGTempMap {
   void encode(bufferlist& bl) const {
     encode(pg_temp, bl);
   }
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     decode(pg_temp, p);
   }
   friend bool operator==(const PGTempMap& l, const PGTempMap& r) {
@@ -418,8 +418,8 @@ public:
     void encode_client_old(bufferlist& bl) const;
     void encode_classic(bufferlist& bl, uint64_t features) const;
     void encode(bufferlist& bl, uint64_t features=CEPH_FEATURES_ALL) const;
-    void decode_classic(bufferlist::iterator &p);
-    void decode(bufferlist::iterator &bl);
+    void decode_classic(bufferlist::const_iterator &p);
+    void decode(bufferlist::const_iterator &bl);
     void dump(Formatter *f) const;
     static void generate_test_instances(list<Incremental*>& o);
 
@@ -427,13 +427,12 @@ public:
       encode_features(0),
       epoch(e), new_pool_max(-1), new_flags(-1), new_max_osd(-1),
       have_crc(false), full_crc(0), inc_crc(0) {
-      memset(&fsid, 0, sizeof(fsid));
     }
     explicit Incremental(bufferlist &bl) {
-      bufferlist::iterator p = bl.begin();
+      auto p = std::cbegin(bl);
       decode(p);
     }
-    explicit Incremental(bufferlist::iterator &p) {
+    explicit Incremental(bufferlist::const_iterator &p) {
       decode(p);
     }
 
@@ -506,6 +505,23 @@ private:
 
   int32_t max_osd;
   vector<uint32_t> osd_state;
+
+  // These features affect OSDMap[::Incremental] encoding, or the
+  // encoding of some type embedded therein (CrushWrapper, something
+  // from osd_types, etc.).
+  static constexpr uint64_t SIGNIFICANT_FEATURES =
+    CEPH_FEATUREMASK_PGID64 |
+    CEPH_FEATUREMASK_PGPOOL3 |
+    CEPH_FEATUREMASK_OSDENC |
+    CEPH_FEATUREMASK_OSDMAP_ENC |
+    CEPH_FEATUREMASK_OSD_POOLRESEND |
+    CEPH_FEATUREMASK_NEW_OSDOP_ENCODING |
+    CEPH_FEATUREMASK_MSG_ADDR2 |
+    CEPH_FEATUREMASK_CRUSH_TUNABLES5 |
+    CEPH_FEATUREMASK_CRUSH_CHOOSE_ARGS |
+    CEPH_FEATUREMASK_SERVER_LUMINOUS |
+    CEPH_FEATUREMASK_SERVER_MIMIC |
+    CEPH_FEATUREMASK_SERVER_NAUTILUS;
 
   struct addrs_s {
     mempool::osdmap::vector<ceph::shared_ptr<entity_addr_t> > client_addr;
@@ -591,13 +607,19 @@ private:
 	     cached_up_osd_features(0),
 	     crc_defined(false), crc(0),
 	     crush(std::make_shared<CrushWrapper>()) {
-    memset(&fsid, 0, sizeof(fsid));
   }
 
 private:
   OSDMap(const OSDMap& other) = default;
   OSDMap& operator=(const OSDMap& other) = default;
 public:
+
+  /// return feature mask subset that is relevant to OSDMap encoding
+  static uint64_t get_significant_features(uint64_t features) {
+    return SIGNIFICANT_FEATURES & features;
+  }
+
+  uint64_t get_encoding_features() const;
 
   void deepish_copy_from(const OSDMap& o) {
     *this = o;
@@ -988,6 +1010,10 @@ public:
    */
   uint64_t get_up_osd_features() const;
 
+  void maybe_remove_pg_upmaps(CephContext *cct,
+                              const OSDMap& osdmap,
+                              Incremental *pending_inc);
+
   int apply_incremental(const Incremental &inc);
 
   /// try to re-use/reference addrs in oldmap from newmap
@@ -1000,12 +1026,12 @@ public:
 private:
   void encode_client_old(bufferlist& bl) const;
   void encode_classic(bufferlist& bl, uint64_t features) const;
-  void decode_classic(bufferlist::iterator& p);
+  void decode_classic(bufferlist::const_iterator& p);
   void post_decode();
 public:
   void encode(bufferlist& bl, uint64_t features=CEPH_FEATURES_ALL) const;
   void decode(bufferlist& bl);
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
 
 
   /****   mapping facilities   ****/
@@ -1066,6 +1092,15 @@ public:
     const pg_pool_t *p = get_pg_pool(pgid.pool());
     assert(p);
     return p->get_size();
+  }
+
+  int get_pg_pool_crush_rule(pg_t pgid) const {
+    if (!pg_exists(pgid)) {
+      return -ENOENT;
+    }
+    const pg_pool_t *p = get_pg_pool(pgid.pool());
+    assert(p);
+    return p->get_crush_rule();
   }
 
 private:
@@ -1162,6 +1197,26 @@ public:
         *out = spg_t(pgid, shard_id_t(i));
         return true;
       }
+    }
+    return false;
+  }
+  bool get_primary_shard(const pg_t& pgid, int *primary, spg_t *out) const {
+    auto i = get_pools().find(pgid.pool());
+    if (i == get_pools().end()) {
+      return false;
+    }
+    vector<int> acting;
+    pg_to_acting_osds(pgid, &acting, primary);
+    if (i->second.is_erasure()) {
+      for (uint8_t i = 0; i < acting.size(); ++i) {
+	if (acting[i] == *primary) {
+	  *out = spg_t(pgid, shard_id_t(i));
+	  return true;
+	}
+      }
+    } else {
+      *out = spg_t(pgid);
+      return true;
     }
     return false;
   }

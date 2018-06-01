@@ -43,7 +43,7 @@ void validate(boost::any& v, const std::vector<std::string>& values,
   const std::string &s = po::validators::get_single_string(values);
 
   std::string parse_error;
-  uint64_t size = strict_sistrtoll(s.c_str(), &parse_error);
+  uint64_t size = strict_iecstrtoll(s.c_str(), &parse_error);
   if (!parse_error.empty()) {
     throw po::validation_error(po::validation_error::invalid_option_value);
   }
@@ -199,8 +199,8 @@ int do_bench(librbd::Image& image, io_type_t io_type,
   uint64_t size = 0;
   image.size(&size);
   if (io_size > size) {
-    std::cerr << "rbd: io-size " << prettybyte_t(io_size) << " "
-              << "larger than image size " << prettybyte_t(size) << std::endl;
+    std::cerr << "rbd: io-size " << byte_u_t(io_size) << " "
+              << "larger than image size " << byte_u_t(size) << std::endl;
     return -EINVAL;
   }
 
@@ -276,6 +276,7 @@ int do_bench(librbd::Image& image, io_type_t io_type,
   int write_ops = 0;
 
   for (off = 0; off < io_bytes; ) {
+    // Issue I/O
     i = 0;
     while (i < io_threads && off < io_bytes) {
       bool read_flag = should_read(read_proportion);
@@ -283,13 +284,6 @@ int do_bench(librbd::Image& image, io_type_t io_type,
       b.wait_for(io_threads - 1);
       b.start_io(io_threads, thread_offset[i], io_size, op_flags, read_flag);
 
-      if (random) {
-        thread_offset[i] = (rand() % (size / io_size)) * io_size;
-      } else {
-        thread_offset[i] += io_size;
-        if (thread_offset[i] + io_size > size)
-          thread_offset[i] = 0;
-      }
       ++i;
       ++ios;
       off += io_size;
@@ -301,6 +295,22 @@ int do_bench(librbd::Image& image, io_type_t io_type,
         read_ops++;
       else
         write_ops++;
+    }
+
+    // Set the thread_offsets of next I/O
+    for (i = 0; i < io_threads; ++i) {
+      if (random) {
+        thread_offset[i] = (rand() % (size / io_size)) * io_size;
+        continue;
+      }
+      if (off < (io_size * unit_len * io_threads) ) {
+        thread_offset[i] += io_size;
+      } else {
+        // thread_offset is adjusted to the chunks unassigned to threads.
+        thread_offset[i] = off + (i * io_size);
+      }
+      if (thread_offset[i] + io_size > size)
+        thread_offset[i] = unit_len * i * io_size;
     }
 
     coarse_mono_time now = coarse_mono_clock::now();

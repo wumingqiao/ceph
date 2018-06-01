@@ -32,7 +32,7 @@ using std::chrono::seconds;
 class Journaler::C_DelayFlush : public Context {
   Journaler *journaler;
   public:
-  C_DelayFlush(Journaler *j) : journaler(j) {}
+  explicit C_DelayFlush(Journaler *j) : journaler(j) {}
   void finish(int r) override {
     journaler->_do_delayed_flush();
   }
@@ -228,7 +228,7 @@ void Journaler::_finish_reread_head(int r, bufferlist& bl, Context *finish)
   // unpack header
   if (r == 0) {
     Header h;
-    bufferlist::iterator p = bl.begin();
+    auto p = bl.cbegin();
     try {
       decode(h, p);
     } catch (const buffer::error &e) {
@@ -275,7 +275,7 @@ void Journaler::_finish_read_head(int r, bufferlist& bl)
   // unpack header
   bool corrupt = false;
   Header h;
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   try {
     decode(h, p);
 
@@ -848,6 +848,13 @@ void Journaler::_finish_prezero(int r, uint64_t start, uint64_t len)
     if (waiting_for_zero_pos > flush_pos) {
       _do_flush(waiting_for_zero_pos - flush_pos);
     }
+
+    if (prezero_pos == prezeroing_pos &&
+	!waitfor_prezero.empty()) {
+      list<Context*> ls;
+      ls.swap(waitfor_prezero);
+      finish_contexts(cct, ls, 0);
+    }
   } else {
     pending_zero.insert(start, len);
   }
@@ -857,6 +864,17 @@ void Journaler::_finish_prezero(int r, uint64_t start, uint64_t len)
 		 << dendl;
 }
 
+void Journaler::wait_for_prezero(Context *onfinish)
+{
+  assert(onfinish);
+  lock_guard l(lock);
+
+  if (prezero_pos == prezeroing_pos) {
+    finisher->queue(onfinish, 0);
+    return;
+  }
+  waitfor_prezero.push_back(wrap_finisher(onfinish));
+}
 
 
 /***************** READING *******************/
@@ -1393,7 +1411,7 @@ bool JournalStream::readable(bufferlist &read_buf, uint64_t *need) const
 
   uint32_t entry_size = 0;
   uint64_t entry_sentinel = 0;
-  bufferlist::iterator p = read_buf.begin();
+  auto p = read_buf.cbegin();
 
   // Do we have enough data to decode an entry prefix?
   if (format >= JOURNAL_FORMAT_RESILIENT) {
@@ -1453,7 +1471,7 @@ size_t JournalStream::read(bufferlist &from, bufferlist *entry,
   uint32_t entry_size = 0;
 
   // Consume envelope prefix: entry_size and entry_sentinel
-  bufferlist::iterator from_ptr = from.begin();
+  auto from_ptr = from.cbegin();
   if (format >= JOURNAL_FORMAT_RESILIENT) {
     uint64_t entry_sentinel = 0;
     decode(entry_sentinel, from_ptr);

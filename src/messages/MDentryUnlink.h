@@ -27,6 +27,7 @@ class MDentryUnlink : public Message {
   string& get_dn() { return dn; }
 
   bufferlist straybl;
+  bufferlist snapbl;
 
   MDentryUnlink() :
     Message(MSG_MDS_DENTRYUNLINK) { }
@@ -44,7 +45,7 @@ public:
   }
   
   void decode_payload() override {
-    bufferlist::iterator p = payload.begin();
+    auto p = payload.cbegin();
     decode(dirfrag, p);
     decode(dn, p);
     decode(straybl, p);

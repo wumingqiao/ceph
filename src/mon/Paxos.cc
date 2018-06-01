@@ -98,17 +98,17 @@ void Paxos::init_logger()
   pcb.add_time_avg(l_paxos_refresh_latency, "refresh_latency", "Refresh latency");
   pcb.add_u64_counter(l_paxos_begin, "begin", "Started and handled begins");
   pcb.add_u64_avg(l_paxos_begin_keys, "begin_keys", "Keys in transaction on begin");
-  pcb.add_u64_avg(l_paxos_begin_bytes, "begin_bytes", "Data in transaction on begin");
+  pcb.add_u64_avg(l_paxos_begin_bytes, "begin_bytes", "Data in transaction on begin", NULL, 0, unit_t(BYTES));
   pcb.add_time_avg(l_paxos_begin_latency, "begin_latency", "Latency of begin operation");
   pcb.add_u64_counter(l_paxos_commit, "commit",
       "Commits", "cmt");
   pcb.add_u64_avg(l_paxos_commit_keys, "commit_keys", "Keys in transaction on commit");
-  pcb.add_u64_avg(l_paxos_commit_bytes, "commit_bytes", "Data in transaction on commit");
+  pcb.add_u64_avg(l_paxos_commit_bytes, "commit_bytes", "Data in transaction on commit", NULL, 0, unit_t(BYTES));
   pcb.add_time_avg(l_paxos_commit_latency, "commit_latency",
       "Commit latency", "clat");
   pcb.add_u64_counter(l_paxos_collect, "collect", "Peon collects");
   pcb.add_u64_avg(l_paxos_collect_keys, "collect_keys", "Keys in transaction on peon collect");
-  pcb.add_u64_avg(l_paxos_collect_bytes, "collect_bytes", "Data in transaction on peon collect");
+  pcb.add_u64_avg(l_paxos_collect_bytes, "collect_bytes", "Data in transaction on peon collect", NULL, 0, unit_t(BYTES));
   pcb.add_time_avg(l_paxos_collect_latency, "collect_latency", "Peon collect latency");
   pcb.add_u64_counter(l_paxos_collect_uncommitted, "collect_uncommitted", "Uncommitted values in started and handled collects");
   pcb.add_u64_counter(l_paxos_collect_timeout, "collect_timeout", "Collect timeouts");
@@ -117,11 +117,11 @@ void Paxos::init_logger()
   pcb.add_u64_counter(l_paxos_lease_timeout, "lease_timeout", "Lease timeouts");
   pcb.add_u64_counter(l_paxos_store_state, "store_state", "Store a shared state on disk");
   pcb.add_u64_avg(l_paxos_store_state_keys, "store_state_keys", "Keys in transaction in stored state");
-  pcb.add_u64_avg(l_paxos_store_state_bytes, "store_state_bytes", "Data in transaction in stored state");
+  pcb.add_u64_avg(l_paxos_store_state_bytes, "store_state_bytes", "Data in transaction in stored state", NULL, 0, unit_t(BYTES));
   pcb.add_time_avg(l_paxos_store_state_latency, "store_state_latency", "Storing state latency");
   pcb.add_u64_counter(l_paxos_share_state, "share_state", "Sharings of state");
   pcb.add_u64_avg(l_paxos_share_state_keys, "share_state_keys", "Keys in shared state");
-  pcb.add_u64_avg(l_paxos_share_state_bytes, "share_state_bytes", "Data in shared state");
+  pcb.add_u64_avg(l_paxos_share_state_bytes, "share_state_bytes", "Data in shared state", NULL, 0, unit_t(BYTES));
   pcb.add_u64_counter(l_paxos_new_pn, "new_pn", "New proposal number queries");
   pcb.add_time_avg(l_paxos_new_pn_latency, "new_pn_latency", "New proposal number getting latency");
   logger = pcb.create_perf_counters();
@@ -196,7 +196,7 @@ void Paxos::collect(version_t oldpn)
     collect->last_committed = last_committed;
     collect->first_committed = first_committed;
     collect->pn = accepted_pn;
-    mon->messenger->send_message(collect, mon->monmap->get_inst(*p));
+    mon->send_mon_message(collect, *p);
   }
 
   // set timeout event
@@ -516,7 +516,7 @@ void Paxos::handle_last(MonOpRequestRef op)
 					MMonPaxos::OP_COMMIT,
 					ceph_clock_now());
       share_state(commit, peer_first_committed[p->first], p->second);
-      mon->messenger->send_message(commit, mon->monmap->get_inst(p->first));
+      mon->send_mon_message(commit, p->first);
     }
   }
 
@@ -650,7 +650,7 @@ void Paxos::begin(bufferlist& v)
   t->dump(&f);
   f.flush(*_dout);
   auto debug_tx(std::make_shared<MonitorDBStore::Transaction>());
-  bufferlist::iterator new_value_it = new_value.begin();
+  auto new_value_it = new_value.cbegin();
   debug_tx->decode(new_value_it);
   debug_tx->dump(&f);
   *_dout << "\nbl dump:\n";
@@ -688,7 +688,7 @@ void Paxos::begin(bufferlist& v)
     begin->last_committed = last_committed;
     begin->pn = accepted_pn;
     
-    mon->messenger->send_message(begin, mon->monmap->get_inst(*p));
+    mon->send_mon_message(begin, *p);
   }
 
   // set timeout event
@@ -914,7 +914,7 @@ void Paxos::commit_finish()
     commit->pn = accepted_pn;
     commit->last_committed = last_committed;
 
-    mon->messenger->send_message(commit, mon->monmap->get_inst(*p));
+    mon->send_mon_message(commit, *p);
   }
 
   assert(g_conf->paxos_kill_at != 9);
@@ -987,7 +987,7 @@ void Paxos::extend_lease()
     lease->last_committed = last_committed;
     lease->lease_timestamp = lease_expire;
     lease->first_committed = first_committed;
-    mon->messenger->send_message(lease, mon->monmap->get_inst(*p));
+    mon->send_mon_message(lease, *p);
   }
 
   // set timeout event.
@@ -1153,7 +1153,7 @@ void Paxos::handle_lease_ack(MonOpRequestRef op)
   } else if (acked_lease.count(from) == 0) {
     acked_lease.insert(from);
     if (ack->feature_map.length()) {
-      auto p = ack->feature_map.begin();
+      auto p = ack->feature_map.cbegin();
       FeatureMap& t = mon->quorum_feature_map[from];
       decode(t, p);
     }

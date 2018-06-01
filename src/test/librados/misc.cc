@@ -9,6 +9,7 @@
 #include "include/rados.h"
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
+#include "include/scope_guard.h"
 #include "include/stringify.h"
 #include "common/Checksummer.h"
 #include "global/global_context.h"
@@ -98,27 +99,24 @@ TEST(LibRadosMiscPool, PoolCreationRace) {
   ASSERT_EQ(0, rados_conf_read_file(cluster_a, NULL));
   // kludge: i want to --log-file foo and only get cluster b
   //ASSERT_EQ(0, rados_conf_parse_env(cluster_a, NULL));
+  ASSERT_EQ(0, rados_conf_set(cluster_a,
+			      "objecter_debug_inject_relock_delay", "true"));
   ASSERT_EQ(0, rados_connect(cluster_a));
 
   ASSERT_EQ(0, rados_create(&cluster_b, NULL));
   ASSERT_EQ(0, rados_conf_read_file(cluster_b, NULL));
   ASSERT_EQ(0, rados_conf_parse_env(cluster_b, NULL));
-  ASSERT_EQ(0, rados_conf_set(cluster_b,
-			      "objecter_debug_inject_relock_delay", "true"));
   ASSERT_EQ(0, rados_connect(cluster_b));
 
   char poolname[80];
   snprintf(poolname, sizeof(poolname), "poolrace.%d", rand());
   rados_pool_create(cluster_a, poolname);
-  rados_ioctx_t a, b;
+  rados_ioctx_t a;
   rados_ioctx_create(cluster_a, poolname, &a);
-  int64_t poolid = rados_ioctx_get_id(a);
-
-  rados_ioctx_create2(cluster_b, poolid+1, &b);
 
   char pool2name[80];
   snprintf(pool2name, sizeof(pool2name), "poolrace2.%d", rand());
-  rados_pool_create(cluster_a, pool2name);
+  rados_pool_create(cluster_b, pool2name);
 
   list<rados_completion_t> cls;
   // this should normally trigger pretty easily, but we need to bound
@@ -130,7 +128,7 @@ TEST(LibRadosMiscPool, PoolCreationRace) {
     rados_completion_t c;
     rados_aio_create_completion(0, 0, 0, &c);
     cls.push_back(c);
-    rados_aio_read(b, "PoolCreationRaceObj", c, buf, 100, 0);
+    rados_aio_read(a, "PoolCreationRaceObj", c, buf, 100, 0);
     cout << "started " << (void*)c << std::endl;
     if (rados_aio_is_complete(cls.front())) {
       break;
@@ -150,7 +148,6 @@ TEST(LibRadosMiscPool, PoolCreationRace) {
   cout << "done." << std::endl;
 
   rados_ioctx_destroy(a);
-  rados_ioctx_destroy(b);
   rados_pool_delete(cluster_a, poolname);
   rados_pool_delete(cluster_a, pool2name);
   rados_shutdown(cluster_b);
@@ -282,7 +279,7 @@ static std::string read_key_from_tmap(IoCtx& ioctx, const std::string &obj,
     oss << "ioctx.read(" << obj << ", bl, 0, 0) returned " << r;
     return oss.str();
   }
-  bufferlist::iterator p = bl.begin();
+  auto p = bl.cbegin();
   bufferlist header;
   map<string, bufferlist> m;
   decode(header, p);
@@ -518,7 +515,7 @@ TEST_F(LibRadosMisc, Exec) {
   ASSERT_GT(res, 0);
   bufferlist bl;
   bl.append(buf2, res);
-  bufferlist::iterator iter = bl.begin();
+  auto iter = bl.cbegin();
   uint64_t all_features;
   decode(all_features, iter);
   // make sure *some* features are specified; don't care which ones
@@ -531,7 +528,7 @@ TEST_F(LibRadosMiscPP, ExecPP) {
   bufferlist bl2, out;
   int r = ioctx.exec("foo", "rbd", "get_all_features", bl2, out);
   ASSERT_EQ(0, r);
-  bufferlist::iterator iter = out.begin();
+  auto iter = out.cbegin();
   uint64_t all_features;
   decode(all_features, iter);
   // make sure *some* features are specified; don't care which ones
@@ -1152,7 +1149,7 @@ TYPED_TEST(LibRadosChecksum, Subset) {
   for (uint32_t i = 0; i < csum_count; ++i) {
     ASSERT_EQ(0, checksum_rvals[i]);
 
-    auto bl_it = checksum_bls[i].begin();
+    auto bl_it = checksum_bls[i].cbegin();
     uint32_t count;
     decode(count, bl_it);
     ASSERT_EQ(1U, count);
@@ -1191,7 +1188,7 @@ TYPED_TEST(LibRadosChecksum, Chunked) {
   ASSERT_EQ(0, this->ioctx.operate("foo", &op, NULL));
   ASSERT_EQ(0, checksum_rval);
 
-  auto bl_it = checksum_bl.begin();
+  auto bl_it = checksum_bl.cbegin();
   uint32_t count;
   decode(count, bl_it);
   ASSERT_EQ(csum_count, count);
@@ -1404,4 +1401,19 @@ TEST_F(LibRadosMiscPP, MinCompatClient) {
 
   ASSERT_LE(-1, require_min_compat_client);
   ASSERT_GT(CEPH_RELEASE_MAX, require_min_compat_client);
+}
+
+TEST_F(LibRadosMiscPP, Conf) {
+  const char* const option = "bluestore_throttle_bytes";
+  size_t new_size = 1 << 20;
+  std::string original;
+  ASSERT_EQ(0, cluster.conf_get(option, original));
+  auto restore_setting = make_scope_guard([&] {
+    cluster.conf_set(option, original.c_str());
+  });
+  std::string expected = std::to_string(new_size);
+  ASSERT_EQ(0, cluster.conf_set(option, expected.c_str()));
+  std::string actual;
+  ASSERT_EQ(0, cluster.conf_get(option, actual));
+  ASSERT_EQ(expected, actual);
 }

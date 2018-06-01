@@ -367,7 +367,7 @@ void ImageWatcher<I>::schedule_request_lock(bool use_timer, int timer_delay) {
          !m_image_ctx.exclusive_lock->is_lock_owner());
 
   RWLock::RLocker watch_locker(this->m_watch_lock);
-  if (this->m_watch_state == Watcher::WATCH_STATE_REGISTERED) {
+  if (this->is_registered(this->m_watch_lock)) {
     ldout(m_image_ctx.cct, 15) << this << " requesting exclusive lock" << dendl;
 
     FunctionContext *ctx = new FunctionContext(
@@ -941,7 +941,7 @@ void ImageWatcher<I>::handle_notify(uint64_t notify_id, uint64_t handle,
     notify_message = NotifyMessage(HeaderUpdatePayload());
   } else {
     try {
-      bufferlist::iterator iter = bl.begin();
+      auto iter = bl.cbegin();
       decode(notify_message, iter);
     } catch (const buffer::error &err) {
       lderr(m_image_ctx.cct) << this << " error decoding image notification: "

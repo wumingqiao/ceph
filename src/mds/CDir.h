@@ -73,25 +73,26 @@ public:
   }
 
   // -- state --
-  static const unsigned STATE_COMPLETE =      (1<< 1);   // the complete contents are in cache
-  static const unsigned STATE_FROZENTREE =    (1<< 2);   // root of tree (bounded by exports)
-  static const unsigned STATE_FREEZINGTREE =  (1<< 3);   // in process of freezing 
-  static const unsigned STATE_FROZENDIR =     (1<< 4);
-  static const unsigned STATE_FREEZINGDIR =   (1<< 5);
-  static const unsigned STATE_COMMITTING =    (1<< 6);   // mid-commit
-  static const unsigned STATE_FETCHING =      (1<< 7);   // currenting fetching
-  static const unsigned STATE_CREATING =      (1<< 8);
-  static const unsigned STATE_IMPORTBOUND =   (1<<10);
-  static const unsigned STATE_EXPORTBOUND =   (1<<11);
-  static const unsigned STATE_EXPORTING =     (1<<12);
-  static const unsigned STATE_IMPORTING =     (1<<13);
-  static const unsigned STATE_FRAGMENTING =   (1<<14);
-  static const unsigned STATE_STICKY =        (1<<15);  // sticky pin due to inode stickydirs
-  static const unsigned STATE_DNPINNEDFRAG =  (1<<16);  // dir is refragmenting
-  static const unsigned STATE_ASSIMRSTAT =    (1<<17);  // assimilating inode->frag rstats
-  static const unsigned STATE_DIRTYDFT =      (1<<18);  // dirty dirfragtree
-  static const unsigned STATE_BADFRAG =       (1<<19);  // bad dirfrag
-  static const unsigned STATE_AUXSUBTREE =    (1<<20);  // no subtree merge
+  static const unsigned STATE_COMPLETE =      (1<< 0);   // the complete contents are in cache
+  static const unsigned STATE_FROZENTREE =    (1<< 1);   // root of tree (bounded by exports)
+  static const unsigned STATE_FREEZINGTREE =  (1<< 2);   // in process of freezing
+  static const unsigned STATE_FROZENDIR =     (1<< 3);
+  static const unsigned STATE_FREEZINGDIR =   (1<< 4);
+  static const unsigned STATE_COMMITTING =    (1<< 5);   // mid-commit
+  static const unsigned STATE_FETCHING =      (1<< 6);   // currenting fetching
+  static const unsigned STATE_CREATING =      (1<< 7);
+  static const unsigned STATE_IMPORTBOUND =   (1<< 8);
+  static const unsigned STATE_EXPORTBOUND =   (1<< 9);
+  static const unsigned STATE_EXPORTING =     (1<<10);
+  static const unsigned STATE_IMPORTING =     (1<<11);
+  static const unsigned STATE_FRAGMENTING =   (1<<12);
+  static const unsigned STATE_STICKY =        (1<<13);  // sticky pin due to inode stickydirs
+  static const unsigned STATE_DNPINNEDFRAG =  (1<<14);  // dir is refragmenting
+  static const unsigned STATE_ASSIMRSTAT =    (1<<15);  // assimilating inode->frag rstats
+  static const unsigned STATE_DIRTYDFT =      (1<<16);  // dirty dirfragtree
+  static const unsigned STATE_BADFRAG =       (1<<17);  // bad dirfrag
+  static const unsigned STATE_TRACKEDBYOFT =  (1<<18);  // tracked by open file table
+  static const unsigned STATE_AUXSUBTREE =    (1<<19);  // no subtree merge
 
   // common states
   static const unsigned STATE_CLEAN =  0;
@@ -102,18 +103,22 @@ public:
   (STATE_COMPLETE|STATE_DIRTY|STATE_DIRTYDFT|STATE_BADFRAG);
   static const unsigned MASK_STATE_IMPORT_KEPT = 
   (						  
-   STATE_IMPORTING
-   |STATE_IMPORTBOUND|STATE_EXPORTBOUND
-   |STATE_FROZENTREE
-   |STATE_STICKY);
+   STATE_IMPORTING |
+   STATE_IMPORTBOUND |
+   STATE_EXPORTBOUND |
+   STATE_FROZENTREE |
+   STATE_STICKY |
+   STATE_TRACKEDBYOFT);
   static const unsigned MASK_STATE_EXPORT_KEPT = 
-  (STATE_EXPORTING
-   |STATE_IMPORTBOUND|STATE_EXPORTBOUND
-   |STATE_FROZENTREE
-   |STATE_FROZENDIR
-   |STATE_STICKY);
+  (STATE_EXPORTING |
+   STATE_IMPORTBOUND |
+   STATE_EXPORTBOUND |
+   STATE_FROZENTREE |
+   STATE_FROZENDIR |
+   STATE_STICKY |
+   STATE_TRACKEDBYOFT);
   static const unsigned MASK_STATE_FRAGMENT_KEPT = 
-  (STATE_DIRTY|
+  (STATE_DIRTY |
    STATE_EXPORTBOUND |
    STATE_IMPORTBOUND |
    STATE_AUXSUBTREE |
@@ -140,8 +145,18 @@ public:
   static const uint64_t WAIT_ATFREEZEROOT = (WAIT_UNFREEZE);
   static const uint64_t WAIT_ATSUBTREEROOT = (WAIT_SINGLEAUTH);
 
-
-
+  // -- dump flags --
+  static const int DUMP_PATH             = (1 << 0);
+  static const int DUMP_DIRFRAG          = (1 << 1);
+  static const int DUMP_SNAPID_FIRST     = (1 << 2);
+  static const int DUMP_VERSIONS         = (1 << 3);
+  static const int DUMP_REP              = (1 << 4);
+  static const int DUMP_DIR_AUTH         = (1 << 5);
+  static const int DUMP_STATES           = (1 << 6);
+  static const int DUMP_MDS_CACHE_OBJECT = (1 << 7);
+  static const int DUMP_ITEMS            = (1 << 8);
+  static const int DUMP_ALL              = (-1);
+  static const int DUMP_DEFAULT          = DUMP_ALL & (~DUMP_ITEMS); 
 
  public:
   // context
@@ -335,6 +350,8 @@ protected:
 
   int num_dirty;
 
+  int num_inodes_with_caps = 0;
+
   // state
   version_t committing_version;
   version_t committed_version;
@@ -361,6 +378,8 @@ protected:
   mono_time last_popularity_sample;
 
   load_spread_t pop_spread;
+
+  elist<CInode*> pop_lru_subdirs;
 
   // and to provide density
   int num_dentries_nested;
@@ -426,6 +445,8 @@ protected:
   int get_num_dirty() const {
     return num_dirty;
   }
+
+  void adjust_num_inodes_with_caps(int d);
 
   int64_t get_frag_size() const {
     return get_projected_fnode()->fragstat.size();
@@ -502,7 +523,7 @@ private:
  public:
   mds_authority_t authority() const override;
   mds_authority_t get_dir_auth() const { return dir_auth; }
-  void set_dir_auth(mds_authority_t a);
+  void set_dir_auth(const mds_authority_t &a);
   void set_dir_auth(mds_rank_t a) { set_dir_auth(mds_authority_t(a, CDIR_AUTH_UNKNOWN)); }
   bool is_ambiguous_dir_auth() const {
     return dir_auth.second != CDIR_AUTH_UNKNOWN;
@@ -552,7 +573,7 @@ private:
     encode(dir_rep, bl);
     encode(dir_rep_by, bl);
   }
-  void _decode_base(bufferlist::iterator& p) {
+  void _decode_base(bufferlist::const_iterator& p) {
     decode(first, p);
     decode(fnode, p);
     decode(dir_rep, p);
@@ -563,7 +584,7 @@ private:
     encode(nonce, bl);
     _encode_base(bl);
   }
-  void decode_replica(bufferlist::iterator& p) {
+  void decode_replica(bufferlist::const_iterator& p) {
     __u32 nonce;
     decode(nonce, p);
     replica_nonce = nonce;
@@ -605,8 +626,7 @@ protected:
       bufferlist &bl,
       int pos,
       const std::set<snapid_t> *snaps,
-      bool *force_dirty,
-      std::list<CInode*> *undef_inodes);
+      bool *force_dirty);
 
   /**
    * Mark this fragment as BADFRAG (common part of go_bad and go_bad_dentry)
@@ -684,7 +704,8 @@ public:
   void abort_export() {
     put(PIN_TEMPEXPORTING);
   }
-  void decode_import(bufferlist::iterator& blp, utime_t now, LogSegment *ls);
+  void decode_import(bufferlist::const_iterator& blp, utime_t now, LogSegment *ls);
+  void abort_import(utime_t now);
 
   // -- auth pins --
   bool can_auth_pin() const override { return is_auth() && !(is_frozen() || is_freezing()); }
@@ -746,7 +767,7 @@ public:
 
   ostream& print_db_line_prefix(ostream& out) override;
   void print(ostream& out) override;
-  void dump(Formatter *f) const;
+  void dump(Formatter *f, int flags = DUMP_DEFAULT) const;
   void dump_load(Formatter *f, utime_t now, const DecayRate& rate);
 };
 

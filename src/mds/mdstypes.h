@@ -46,6 +46,8 @@
 // so that we don't try to fragment it.
 #define MDS_INO_CEPH              2
 
+#define MDS_INO_GLOBAL_SNAPREALM  3
+
 #define MDS_INO_MDSDIR_OFFSET     (1*MAX_MDS)
 #define MDS_INO_STRAY_OFFSET      (6*MAX_MDS)
 
@@ -63,7 +65,7 @@
 #define MDS_INO_IS_STRAY(i)  ((i) >= MDS_INO_STRAY_OFFSET  && (i) < (MDS_INO_STRAY_OFFSET+(MAX_MDS*NUM_STRAY)))
 #define MDS_INO_IS_MDSDIR(i) ((i) >= MDS_INO_MDSDIR_OFFSET && (i) < (MDS_INO_MDSDIR_OFFSET+MAX_MDS))
 #define MDS_INO_MDSDIR_OWNER(i) (signed ((unsigned (i)) - MDS_INO_MDSDIR_OFFSET))
-#define MDS_INO_IS_BASE(i)   (MDS_INO_ROOT == (i) || MDS_INO_IS_MDSDIR(i))
+#define MDS_INO_IS_BASE(i)   ((i) == MDS_INO_ROOT || (i) == MDS_INO_GLOBAL_SNAPREALM || MDS_INO_IS_MDSDIR(i))
 #define MDS_INO_STRAY_OWNER(i) (signed (((unsigned (i)) - MDS_INO_STRAY_OFFSET) / NUM_STRAY))
 #define MDS_INO_STRAY_INDEX(i) (((unsigned (i)) - MDS_INO_STRAY_OFFSET) % NUM_STRAY)
 
@@ -204,7 +206,7 @@ struct frag_info_t : public scatter_info_t {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<frag_info_t*>& ls);
 };
@@ -267,7 +269,7 @@ struct nest_info_t : public scatter_info_t {
   }
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<nest_info_t*>& ls);
 };
@@ -294,7 +296,7 @@ struct vinodeno_t {
     encode(ino, bl);
     encode(snapid, bl);
   }
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     using ceph::decode;
     decode(ino, p);
     decode(snapid, p);
@@ -327,7 +329,7 @@ struct quota_info_t
     encode(max_files, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, p);
     decode(max_bytes, p);
     decode(max_files, p);
@@ -390,12 +392,12 @@ struct client_writeable_range_t {
   client_writeable_range_t() {}
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(std::list<client_writeable_range_t*>& ls);
 };
 
-inline void decode(client_writeable_range_t::byte_range_t& range, bufferlist::iterator& bl) {
+inline void decode(client_writeable_range_t::byte_range_t& range, bufferlist::const_iterator& bl) {
   decode(range.first, bl);
   decode(range.last, bl);
 }
@@ -448,7 +450,7 @@ public:
     return !(*this == o);
   }
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
 };
 WRITE_CLASS_ENCODER(inline_data_t)
 
@@ -532,7 +534,6 @@ struct inode_t {
   {
     clear_layout();
     memset(&dir_layout, 0, sizeof(dir_layout));
-    memset(&quota, 0, sizeof(quota));
   }
 
   // file type
@@ -610,7 +611,7 @@ struct inode_t {
   }
 
   void encode(bufferlist &bl, uint64_t features) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(std::list<inode_t*>& ls);
   /**
@@ -690,7 +691,7 @@ void inode_t<Allocator>::encode(bufferlist &bl, uint64_t features) const
 }
 
 template<template<typename> class Allocator>
-void inode_t<Allocator>::decode(bufferlist::iterator &p)
+void inode_t<Allocator>::decode(bufferlist::const_iterator &p)
 {
   DECODE_START_LEGACY_COMPAT_LEN(15, 6, 6, p);
 
@@ -930,7 +931,7 @@ inline void encode(const inode_t<Allocator> &c, ::ceph::bufferlist &bl, uint64_t
   ENCODE_DUMP_POST(cl);
 }
 template<template<typename> class Allocator>
-inline void decode(inode_t<Allocator> &c, ::ceph::bufferlist::iterator &p)
+inline void decode(inode_t<Allocator> &c, ::ceph::bufferlist::const_iterator &p)
 {
   c.decode(p);
 }
@@ -951,7 +952,7 @@ struct old_inode_t {
   xattr_map<Allocator> xattrs;
 
   void encode(bufferlist &bl, uint64_t features) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(std::list<old_inode_t*>& ls);
 };
@@ -968,7 +969,7 @@ void old_inode_t<Allocator>::encode(bufferlist& bl, uint64_t features) const
 }
 
 template<template<typename> class Allocator>
-void old_inode_t<Allocator>::decode(bufferlist::iterator& bl)
+void old_inode_t<Allocator>::decode(bufferlist::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
   decode(first, bl);
@@ -1011,7 +1012,7 @@ inline void encode(const old_inode_t<Allocator> &c, ::ceph::bufferlist &bl, uint
   ENCODE_DUMP_POST(cl);
 }
 template<template<typename> class Allocator>
-inline void decode(old_inode_t<Allocator> &c, ::ceph::bufferlist::iterator &p)
+inline void decode(old_inode_t<Allocator> &c, ::ceph::bufferlist::const_iterator &p)
 {
   c.decode(p);
 }
@@ -1035,7 +1036,7 @@ struct fnode_t {
   utime_t localized_scrub_stamp;
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<fnode_t*>& ls);
   fnode_t() {}
@@ -1048,7 +1049,7 @@ struct old_rstat_t {
   nest_info_t rstat, accounted_rstat;
 
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& p);
+  void decode(bufferlist::const_iterator& p);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<old_rstat_t*>& ls);
 };
@@ -1083,7 +1084,7 @@ struct session_info_t {
   }
 
   void encode(bufferlist& bl, uint64_t features) const;
-  void decode(bufferlist::iterator& p);
+  void decode(bufferlist::const_iterator& p);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<session_info_t*>& ls);
 };
@@ -1123,7 +1124,7 @@ struct dentry_key_t {
     oss << name << "_" << b;
     key = oss.str();
   }
-  static void decode_helper(bufferlist::iterator& bl, string& nm, snapid_t& sn) {
+  static void decode_helper(bufferlist::const_iterator& bl, string& nm, snapid_t& sn) {
     string key;
     decode(key, bl);
     decode_helper(key, nm, sn);
@@ -1176,7 +1177,7 @@ struct string_snap_t {
   string_snap_t(const char *n, snapid_t s) : name(n), snapid(s) {}
 
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& p);
+  void decode(bufferlist::const_iterator& p);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<string_snap_t*>& ls);
 };
@@ -1204,7 +1205,7 @@ struct mds_table_pending_t {
   version_t tid = 0;
   mds_table_pending_t() {}
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<mds_table_pending_t*>& ls);
 };
@@ -1224,7 +1225,7 @@ struct metareqid_t {
     encode(name, bl);
     encode(tid, bl);
   }
-  void decode(bufferlist::iterator &p) {
+  void decode(bufferlist::const_iterator &p) {
     using ceph::decode;
     decode(name, p);
     decode(tid, p);
@@ -1287,9 +1288,9 @@ struct cap_reconnect_t {
     flockbl.claim(lb);
   }
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void encode_old(bufferlist& bl) const;
-  void decode_old(bufferlist::iterator& bl);
+  void decode_old(bufferlist::const_iterator& bl);
 
   void dump(Formatter *f) const;
   static void generate_test_instances(list<cap_reconnect_t*>& ls);
@@ -1338,7 +1339,7 @@ struct old_cap_reconnect_t {
     encode(path, bl);
     encode(capinfo, bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     using ceph::decode;
     decode(path, bl);
     decode(capinfo, bl);
@@ -1362,7 +1363,7 @@ struct dirfrag_t {
     encode(ino, bl);
     encode(frag, bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     using ceph::decode;
     decode(ino, bl);
     decode(frag, bl);
@@ -1424,18 +1425,18 @@ public:
       vec[i].reset(now);
   }
   void encode(bufferlist &bl) const;
-  void decode(const utime_t &t, bufferlist::iterator &p);
+  void decode(const utime_t &t, bufferlist::const_iterator &p);
   // for dencoder
-  void decode(bufferlist::iterator& p) { utime_t sample; decode(sample, p); }
+  void decode(bufferlist::const_iterator& p) { utime_t sample; decode(sample, p); }
   void dump(Formatter *f);
   static void generate_test_instances(list<inode_load_vec_t*>& ls);
 };
 inline void encode(const inode_load_vec_t &c, bufferlist &bl) { c.encode(bl); }
-inline void decode(inode_load_vec_t & c, const utime_t &t, bufferlist::iterator &p) {
+inline void decode(inode_load_vec_t & c, const utime_t &t, bufferlist::const_iterator &p) {
   c.decode(t, p);
 }
 // for dencoder
-inline void decode(inode_load_vec_t & c, bufferlist::iterator &p) {
+inline void decode(inode_load_vec_t & c, bufferlist::const_iterator &p) {
   utime_t sample;
   c.decode(sample, p);
 }
@@ -1462,7 +1463,7 @@ public:
     }
     ENCODE_FINISH(bl);
   }
-  void decode(const utime_t &t, bufferlist::iterator &p) {
+  void decode(const utime_t &t, bufferlist::const_iterator &p) {
     DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, p);
     for (auto &i : vec) {
       decode(i, t, p);
@@ -1470,7 +1471,7 @@ public:
     DECODE_FINISH(p);
   }
   // for dencoder infrastructure
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     utime_t sample;
     decode(sample, p);
   }
@@ -1500,7 +1501,7 @@ public:
       2*vec[META_POP_FETCH].get(now, rate) +
       4*vec[META_POP_STORE].get(now, rate);
   }
-  double meta_load() {
+  double meta_load() const {
     return 
       1*vec[META_POP_IRD].get_last() + 
       2*vec[META_POP_IWR].get_last() +
@@ -1524,23 +1525,19 @@ public:
 };
 
 inline void encode(const dirfrag_load_vec_t &c, bufferlist &bl) { c.encode(bl); }
-inline void decode(dirfrag_load_vec_t& c, const utime_t &t, bufferlist::iterator &p) {
+inline void decode(dirfrag_load_vec_t& c, const utime_t &t, bufferlist::const_iterator &p) {
   c.decode(t, p);
 }
 // this for dencoder
-inline void decode(dirfrag_load_vec_t& c, bufferlist::iterator &p) {
+inline void decode(dirfrag_load_vec_t& c, bufferlist::const_iterator &p) {
   utime_t sample;
   c.decode(sample, p);
 }
 
-inline std::ostream& operator<<(std::ostream& out, dirfrag_load_vec_t& dl)
+inline std::ostream& operator<<(std::ostream& out, const dirfrag_load_vec_t& dl)
 {
-  // ugliness!
-  utime_t now = ceph_clock_now();
-  DecayRate rate(g_conf->mds_decay_halflife);
-  return out << "[" << dl.vec[0].get(now, rate) << "," << dl.vec[1].get(now, rate) 
-	     << " " << dl.meta_load(now, rate)
-	     << "]";
+  return out << "[" << dl.vec[0].get_last() << "," << dl.vec[1].get_last()
+	     << " " << dl.meta_load() << "]";
 }
 
 
@@ -1568,23 +1565,23 @@ struct mds_load_t {
   
   double mds_load();  // defiend in MDBalancer.cc
   void encode(bufferlist& bl) const;
-  void decode(const utime_t& now, bufferlist::iterator& bl);
+  void decode(const utime_t& now, bufferlist::const_iterator& bl);
   //this one is for dencoder infrastructure
-  void decode(bufferlist::iterator& bl) { utime_t sample; decode(sample, bl); }
+  void decode(bufferlist::const_iterator& bl) { utime_t sample; decode(sample, bl); }
   void dump(Formatter *f) const;
   static void generate_test_instances(list<mds_load_t*>& ls);
 };
 inline void encode(const mds_load_t &c, bufferlist &bl) { c.encode(bl); }
-inline void decode(mds_load_t &c, const utime_t &t, bufferlist::iterator &p) {
+inline void decode(mds_load_t &c, const utime_t &t, bufferlist::const_iterator &p) {
   c.decode(t, p);
 }
 // this one is for dencoder
-inline void decode(mds_load_t &c, bufferlist::iterator &p) {
+inline void decode(mds_load_t &c, bufferlist::const_iterator &p) {
   utime_t sample;
   c.decode(sample, p);
 }
 
-inline std::ostream& operator<<( std::ostream& out, mds_load_t& load )
+inline std::ostream& operator<<(std::ostream& out, const mds_load_t& load)
 {
   return out << "mdsload<" << load.auth << "/" << load.all
              << ", req " << load.req_rate 
@@ -1651,7 +1648,7 @@ public:
   MDSCacheObjectInfo() {}
 
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& bl);
+  void decode(bufferlist::const_iterator& bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<MDSCacheObjectInfo*>& ls);
 };

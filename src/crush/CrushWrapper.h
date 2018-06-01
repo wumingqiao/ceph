@@ -46,7 +46,7 @@ inline void encode(const crush_rule_step &s, bufferlist &bl)
   encode(s.arg1, bl);
   encode(s.arg2, bl);
 }
-inline void decode(crush_rule_step &s, bufferlist::iterator &p)
+inline void decode(crush_rule_step &s, bufferlist::const_iterator &p)
 {
   using ceph::decode;
   decode(s.op, p);
@@ -74,12 +74,12 @@ public:
   std::map<int64_t, crush_choose_arg_map> choose_args;
 
 private:
-  struct crush_map *crush;
+  struct crush_map *crush = nullptr;
 
   bool have_uniform_rules = false;
 
   /* reverse maps */
-  mutable bool have_rmaps;
+  mutable bool have_rmaps = false;
   mutable std::map<string, int> type_rmap, name_rmap, rule_name_rmap;
   void build_rmaps() const {
     if (have_rmaps) return;
@@ -98,7 +98,7 @@ public:
   CrushWrapper(const CrushWrapper& other);
   const CrushWrapper& operator=(const CrushWrapper& other);
 
-  CrushWrapper() : crush(0), have_rmaps(false) {
+  CrushWrapper() {
     create();
   }
   ~CrushWrapper() {
@@ -587,6 +587,7 @@ public:
    * Note that these may not be parentless roots.
    */
   void find_takes(set<int> *roots) const;
+  void find_takes_by_rule(int rule, set<int> *roots) const;
 
   /**
    * find tree roots
@@ -683,9 +684,10 @@ public:
 
   /**
    * return ancestor of the given type, or 0 if none
+   * can pass in a specific crush **rule** to return ancestor from that rule only 
    * (parent is always a bucket and thus <0)
    */
-  int get_parent_of_type(int id, int type) const;
+  int get_parent_of_type(int id, int type, int rule = -1) const;
 
   /**
    * get the fully qualified location of a device by successively finding
@@ -697,6 +699,13 @@ public:
    * specified in the CRUSH map and foo is a name specified in the CRUSH map
    */
   map<string, string> get_full_location(int id) const;
+
+  /**
+   * return location map for a item, by name
+   */
+  int get_full_location(
+    const string& name,
+    std::map<string,string> *ploc);
 
   /*
    * identical to get_full_location(int id) although it returns the type/name
@@ -728,6 +737,17 @@ public:
    * @return number of items, or error
    */
   int get_children(int id, list<int> *children) const;
+  void get_children_of_type(int id,
+                            int type,
+			    set<int> *children,
+			    bool exclude_shadow = true) const;
+
+  /**
+    * get failure-domain type of a specific crush rule
+    * @param rule_id crush rule id
+    * @return type of failure-domain or a negative errno on error.
+    */
+  int get_rule_failure_domain(int rule_id);
 
   /**
     * enumerate leaves(devices) of given node
@@ -898,6 +918,7 @@ public:
 			   std::map<string,string> *ploc);
   static int parse_loc_multimap(const std::vector<string>& args,
 				std::multimap<string,string> *ploc);
+
 
   /**
    * get an item's weight
@@ -1383,7 +1404,7 @@ public:
   void destroy_choose_args(crush_choose_arg_map arg_map) {
     for (__u32 i = 0; i < arg_map.size; i++) {
       crush_choose_arg *arg = &arg_map.args[i];
-      for (__u32 j = 0; j < arg->weight_set_size; j++) {
+      for (__u32 j = 0; j < arg->weight_set_positions; j++) {
 	crush_weight_set *weight_set = &arg->weight_set[j];
 	free(weight_set->weights);
       }
@@ -1400,8 +1421,8 @@ public:
       return false;
     assert(positions);
     auto &cmap = choose_args[id];
-    cmap.args = (crush_choose_arg*)calloc(sizeof(crush_choose_arg),
-					  crush->max_buckets);
+    cmap.args = static_cast<crush_choose_arg*>(calloc(sizeof(crush_choose_arg),
+					  crush->max_buckets));
     cmap.size = crush->max_buckets;
     for (int bidx=0; bidx < crush->max_buckets; ++bidx) {
       crush_bucket *b = crush->buckets[bidx];
@@ -1409,10 +1430,10 @@ public:
       carg.ids = NULL;
       carg.ids_size = 0;
       if (b && b->alg == CRUSH_BUCKET_STRAW2) {
-	crush_bucket_straw2 *sb = (crush_bucket_straw2*)b;
-	carg.weight_set_size = positions;
-	carg.weight_set = (crush_weight_set*)calloc(sizeof(crush_weight_set),
-						    carg.weight_set_size);
+	crush_bucket_straw2 *sb = reinterpret_cast<crush_bucket_straw2*>(b);
+	carg.weight_set_positions = positions;
+	carg.weight_set = static_cast<crush_weight_set*>(calloc(sizeof(crush_weight_set),
+						    carg.weight_set_positions));
 	// initialize with canonical weights
 	for (int pos = 0; pos < positions; ++pos) {
 	  carg.weight_set[pos].size = b->size;
@@ -1423,7 +1444,7 @@ public:
 	}
       } else {
 	carg.weight_set = NULL;
-	carg.weight_set_size = 0;
+	carg.weight_set_positions = 0;
       }
     }
     return true;
@@ -1442,6 +1463,9 @@ public:
       destroy_choose_args(w.second);
     choose_args.clear();
   }
+
+  // remove choose_args for buckets that no longer exist, create them for new buckets
+  void update_choose_args(CephContext *cct);
 
   // adjust choose_args_map weight, preserving the hierarchical summation
   // property.  used by callers optimizing layouts by tweaking weights.
@@ -1472,8 +1496,8 @@ public:
   int get_choose_args_positions(crush_choose_arg_map cmap) {
     // infer positions from other buckets
     for (unsigned j = 0; j < cmap.size; ++j) {
-      if (cmap.args[j].weight_set_size) {
-	return cmap.args[j].weight_set_size;
+      if (cmap.args[j].weight_set_positions) {
+	return cmap.args[j].weight_set_positions;
       }
     }
     return 1;
@@ -1542,8 +1566,8 @@ public:
   }
 
   void encode(bufferlist &bl, uint64_t features) const;
-  void decode(bufferlist::iterator &blp);
-  void decode_crush_bucket(crush_bucket** bptr, bufferlist::iterator &blp);
+  void decode(bufferlist::const_iterator &blp);
+  void decode_crush_bucket(crush_bucket** bptr, bufferlist::const_iterator &blp);
   void dump(Formatter *f) const;
   void dump_rules(Formatter *f) const;
   void dump_rule(int ruleset, Formatter *f) const;

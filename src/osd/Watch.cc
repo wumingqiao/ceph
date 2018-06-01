@@ -25,7 +25,7 @@ struct CancelableContext : public Context {
 static ostream& _prefix(
   std::ostream* _dout,
   Notify *notify) {
-  return *_dout << notify->gen_dbg_prefix();
+  return notify->gen_dbg_prefix(*_dout);
 }
 
 Notify::Notify(
@@ -229,7 +229,7 @@ void Notify::init()
 static ostream& _prefix(
   std::ostream* _dout,
   Watch *watch) {
-  return *_dout << watch->gen_dbg_prefix();
+  return watch->gen_dbg_prefix(*_dout);
 }
 
 class HandleWatchTimeout : public CancelableContext {
@@ -278,11 +278,9 @@ public:
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
 
-string Watch::gen_dbg_prefix() {
-  stringstream ss;
-  ss << pg->gen_prefix() << " -- Watch(" 
-     << make_pair(cookie, entity) << ") ";
-  return ss.str();
+std::ostream& Watch::gen_dbg_prefix(std::ostream& out) {
+  return pg->gen_prefix(out) << " -- Watch("
+      << make_pair(cookie, entity) << ") ";
 }
 
 Watch::Watch(
@@ -369,10 +367,11 @@ void Watch::connect(ConnectionRef con, bool _will_ping)
   dout(10) << __func__ << " con " << con << dendl;
   conn = con;
   will_ping = _will_ping;
-  Session* sessionref(static_cast<Session*>(con->get_priv()));
-  if (sessionref) {
+  auto priv = con->get_priv();
+  if (priv) {
+    auto sessionref = static_cast<Session*>(priv.get());
     sessionref->wstate.addWatch(self.lock());
-    sessionref->put();
+    priv.reset();
     for (map<uint64_t, NotifyRef>::iterator i = in_progress_notifies.begin();
 	 i != in_progress_notifies.end();
 	 ++i) {
@@ -415,10 +414,9 @@ void Watch::discard_state()
   unregister_cb();
   discarded = true;
   if (conn) {
-    Session* sessionref(static_cast<Session*>(conn->get_priv()));
-    if (sessionref) {
-      sessionref->wstate.removeWatch(self.lock());
-      sessionref->put();
+    if (auto priv = conn->get_priv(); priv) {
+      auto session = static_cast<Session*>(priv.get());
+      session->wstate.removeWatch(self.lock());
     }
     conn = ConnectionRef();
   }

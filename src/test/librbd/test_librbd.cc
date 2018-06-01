@@ -377,6 +377,15 @@ TEST_F(TestLibRBD, GetId)
     ASSERT_EQ(-ERANGE, rbd_get_id(image, id, 0));
     ASSERT_EQ(0, rbd_get_id(image, id, sizeof(id)));
     ASSERT_LT(0U, strlen(id));
+
+    ASSERT_EQ(0, rbd_close(image));
+    ASSERT_EQ(0, rbd_open_by_id(ioctx, id, &image, NULL));
+    size_t name_len = 0;
+    ASSERT_EQ(-ERANGE, rbd_get_name(image, NULL, &name_len));
+    ASSERT_EQ(name_len, name.size() + 1);
+    char image_name[name_len];
+    ASSERT_EQ(0, rbd_get_name(image, image_name, &name_len));
+    ASSERT_STREQ(name.c_str(), image_name);
   }
 
   ASSERT_EQ(0, rbd_close(image));
@@ -402,6 +411,12 @@ TEST_F(TestLibRBD, GetIdPP)
   } else {
     ASSERT_EQ(0, image.get_id(&id));
     ASSERT_LT(0U, id.size());
+
+    ASSERT_EQ(0, image.close());
+    ASSERT_EQ(0, rbd.open_by_id(ioctx, image, id.c_str(), NULL));
+    std::string image_name;
+    ASSERT_EQ(0, image.get_name(&image_name));
+    ASSERT_EQ(name, image_name);
   }
 }
 
@@ -697,7 +712,7 @@ TEST_F(TestLibRBD, UpdateWatchAndResize)
       Watcher *watcher = static_cast<Watcher *>(arg);
       watcher->handle_notify();
     }
-    Watcher(rbd_image_t &image) : m_image(image) {}
+    explicit Watcher(rbd_image_t &image) : m_image(image) {}
     void handle_notify() {
       rbd_image_info_t info;
       ASSERT_EQ(0, rbd_stat(m_image, &info, sizeof(info)));
@@ -743,7 +758,7 @@ TEST_F(TestLibRBD, UpdateWatchAndResizePP)
     std::string name = get_temp_image_name();
     uint64_t size = 2 << 20;
     struct Watcher : public librbd::UpdateWatchCtx {
-      Watcher(librbd::Image &image) : m_image(image) {
+      explicit Watcher(librbd::Image &image) : m_image(image) {
       }
       void handle_notify() override {
         librbd::image_info_t info;
@@ -834,7 +849,8 @@ TEST_F(TestLibRBD, TestCreateLsDelete)
   std::string name = get_temp_image_name();
   std::string name2 = get_temp_image_name();
   uint64_t size = 2 << 20;
-  
+
+  ASSERT_EQ(0, test_ls(ioctx, 0));
   ASSERT_EQ(0, create_image(ioctx, name.c_str(), size, &order));
   ASSERT_EQ(1, test_ls(ioctx, 1, name.c_str()));
   ASSERT_EQ(0, create_image(ioctx, name2.c_str(), size, &order));
@@ -3368,9 +3384,10 @@ TEST_F(TestLibRBD, ListChildrenTiered)
   REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
 
   librbd::RBD rbd;
-  string pool_name1 = m_pool_name;
+  string pool_name1 = create_pool(true);
   string pool_name2 = create_pool(true);
   string pool_name3 = create_pool(true);
+  ASSERT_NE("", pool_name1);
   ASSERT_NE("", pool_name2);
   ASSERT_NE("", pool_name3);
 
@@ -3494,7 +3511,7 @@ TEST_F(TestLibRBD, ListChildrenTiered)
                       child_id2, pool_name1.c_str(), child_name2.c_str(), false,
                       child_id3, pool_name2.c_str(), child_name3.c_str(), true,
                       child_id4, pool_name2.c_str(), child_name4.c_str(), false);
-  
+
   ASSERT_EQ(0, rbd.trash_restore(ioctx3, child_id3, ""));
   test_list_children(parent, 4, pool_name2.c_str(), child_name1.c_str(),
 		     pool_name1.c_str(), child_name2.c_str(),
@@ -4554,7 +4571,7 @@ TEST_F(TestLibRBD, RebuildObjectMapViaLockOwner)
 
 TEST_F(TestLibRBD, RenameViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING | RBD_FEATURE_EXCLUSIVE_LOCK);
+  REQUIRE_FEATURE(RBD_FEATURE_JOURNALING);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -4586,7 +4603,7 @@ TEST_F(TestLibRBD, RenameViaLockOwner)
 
 TEST_F(TestLibRBD, SnapCreateViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING | RBD_FEATURE_EXCLUSIVE_LOCK);
+  REQUIRE_FEATURE(RBD_FEATURE_EXCLUSIVE_LOCK);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -4630,7 +4647,7 @@ TEST_F(TestLibRBD, SnapCreateViaLockOwner)
 
 TEST_F(TestLibRBD, SnapRemoveViaLockOwner)
 {
-  REQUIRE_FEATURE(RBD_FEATURE_LAYERING | RBD_FEATURE_EXCLUSIVE_LOCK);
+  REQUIRE_FEATURE(RBD_FEATURE_FAST_DIFF);
 
   librados::IoCtx ioctx;
   ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
@@ -6586,6 +6603,29 @@ TEST_F(TestLibRBD, TestListWatchers) {
   ASSERT_EQ(0, image.list_watchers(watchers));
   ASSERT_EQ(1, watchers.size());
   ASSERT_EQ(0, image.close());
+}
+
+TEST_F(TestLibRBD, TestSetSnapById) {
+  librados::IoCtx ioctx;
+  ASSERT_EQ(0, _rados.ioctx_create(m_pool_name.c_str(), ioctx));
+
+  librbd::RBD rbd;
+  std::string name = get_temp_image_name();
+
+  uint64_t size = 1 << 18;
+  int order = 12;
+  ASSERT_EQ(0, create_image_pp(rbd, ioctx, name.c_str(), size, &order));
+
+  librbd::Image image;
+  ASSERT_EQ(0, rbd.open(ioctx, image, name.c_str(), nullptr));
+  ASSERT_EQ(0, image.snap_create("snap"));
+
+  vector<librbd::snap_info_t> snaps;
+  ASSERT_EQ(0, image.snap_list(snaps));
+  ASSERT_EQ(1U, snaps.size());
+
+  ASSERT_EQ(0, image.snap_set_by_id(snaps[0].id));
+  ASSERT_EQ(0, image.snap_set_by_id(CEPH_NOSNAP));
 }
 
 // poorman's assert()

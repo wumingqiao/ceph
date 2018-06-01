@@ -31,7 +31,8 @@
 #define PAXOS_MGR        5
 #define PAXOS_MGRSTAT    6
 #define PAXOS_HEALTH     7
-#define PAXOS_NUM        8
+#define PAXOS_CONFIG     8
+#define PAXOS_NUM        9
 
 inline const char *get_paxos_name(int p) {
   switch (p) {
@@ -43,11 +44,14 @@ inline const char *get_paxos_name(int p) {
   case PAXOS_MGR: return "mgr";
   case PAXOS_MGRSTAT: return "mgrstat";
   case PAXOS_HEALTH: return "health";
+  case PAXOS_CONFIG: return "config";
   default: ceph_abort(); return 0;
   }
 }
 
 #define CEPH_MON_ONDISK_MAGIC "ceph mon volume v012"
+
+extern const string CONFIG_PREFIX;
 
 // map of entity_type -> features -> count
 struct FeatureMap {
@@ -96,7 +100,7 @@ struct FeatureMap {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     DECODE_START(1, p);
     decode(m, p);
     DECODE_FINISH(p);
@@ -162,7 +166,7 @@ struct LevelDBStoreStats {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator &p) {
+  void decode(bufferlist::const_iterator &p) {
     DECODE_START(1, p);
     decode(bytes_total, p);
     decode(bytes_sst, p);
@@ -214,7 +218,7 @@ struct DataStats {
     encode(store_stats, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator &p) {
+  void decode(bufferlist::const_iterator &p) {
     DECODE_START(1, p);
     // we moved from having fields in kb to fields in byte
     if (struct_v > 2) {
@@ -254,7 +258,7 @@ struct ScrubResult {
     encode(prefix_keys, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     DECODE_START(1, p);
     decode(prefix_crc, p);
     decode(prefix_keys, p);
@@ -475,7 +479,7 @@ public:
     encode(features, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& p) {
+  void decode(bufferlist::const_iterator& p) {
     DECODE_START(COMPAT_VERSION, p);
     decode(features, p);
     DECODE_FINISH(p);
@@ -489,6 +493,8 @@ namespace ceph {
       constexpr mon_feature_t FEATURE_KRAKEN(     (1ULL << 0));
       constexpr mon_feature_t FEATURE_LUMINOUS(   (1ULL << 1));
       constexpr mon_feature_t FEATURE_MIMIC(      (1ULL << 2));
+      constexpr mon_feature_t FEATURE_OSDMAP_PRUNE (1ULL << 3);
+      constexpr mon_feature_t FEATURE_NAUTILUS(    (1ULL << 4));
 
       constexpr mon_feature_t FEATURE_RESERVED(   (1ULL << 63));
       constexpr mon_feature_t FEATURE_NONE(       (0ULL));
@@ -503,6 +509,8 @@ namespace ceph {
 	  FEATURE_KRAKEN |
 	  FEATURE_LUMINOUS |
 	  FEATURE_MIMIC |
+          FEATURE_OSDMAP_PRUNE |
+	  FEATURE_NAUTILUS |
 	  FEATURE_NONE
 	  );
       }
@@ -521,11 +529,20 @@ namespace ceph {
 	  FEATURE_KRAKEN |
 	  FEATURE_LUMINOUS |
 	  FEATURE_MIMIC |
+	  FEATURE_NAUTILUS |
+	  FEATURE_OSDMAP_PRUNE |
 	  FEATURE_NONE
 	  );
       }
 
-      static inline mon_feature_t get_feature_by_name(std::string n);
+      constexpr mon_feature_t get_optional() {
+        return (
+          FEATURE_OSDMAP_PRUNE |
+          FEATURE_NONE
+          );
+      }
+
+      static inline mon_feature_t get_feature_by_name(const std::string &n);
     }
   }
 }
@@ -539,13 +556,17 @@ static inline const char *ceph::features::mon::get_feature_name(uint64_t b) {
     return "luminous";
   } else if (f == FEATURE_MIMIC) {
     return "mimic";
+  } else if (f == FEATURE_OSDMAP_PRUNE) {
+    return "osdmap-prune";
+  } else if (f == FEATURE_NAUTILUS) {
+    return "nautilus";
   } else if (f == FEATURE_RESERVED) {
     return "reserved";
   }
   return "unknown";
 }
 
-inline mon_feature_t ceph::features::mon::get_feature_by_name(std::string n) {
+inline mon_feature_t ceph::features::mon::get_feature_by_name(const std::string &n) {
 
   if (n == "kraken") {
     return FEATURE_KRAKEN;
@@ -553,6 +574,10 @@ inline mon_feature_t ceph::features::mon::get_feature_by_name(std::string n) {
     return FEATURE_LUMINOUS;
   } else if (n == "mimic") {
     return FEATURE_MIMIC;
+  } else if (n == "osdmap-prune") {
+    return FEATURE_OSDMAP_PRUNE;
+  } else if (n == "nautilus") {
+    return FEATURE_NAUTILUS;
   } else if (n == "reserved") {
     return FEATURE_RESERVED;
   }

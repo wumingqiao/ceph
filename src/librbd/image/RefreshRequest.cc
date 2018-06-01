@@ -16,6 +16,8 @@
 #include "librbd/ObjectMap.h"
 #include "librbd/Utils.h"
 #include "librbd/image/RefreshParentRequest.h"
+#include "librbd/io/AioCompletion.h"
+#include "librbd/io/ImageDispatchSpec.h"
 #include "librbd/io/ImageRequestWQ.h"
 #include "librbd/journal/Policy.h"
 
@@ -136,7 +138,7 @@ Context *RefreshRequest<I>::handle_v1_get_snapshots(int *result) {
   std::vector<std::string> snap_names;
   std::vector<uint64_t> snap_sizes;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::old_snapshot_list_finish(&it, &snap_names,
                                                    &snap_sizes, &m_snapc);
   }
@@ -193,7 +195,7 @@ Context *RefreshRequest<I>::handle_v1_get_locks(int *result) {
   if (*result == -EOPNOTSUPP) {
     *result = 0;
   } else if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     ClsLockType lock_type;
     *result = rados::cls::lock::get_lock_info_finish(&it, &m_lockers,
                                                      &lock_type, &m_lock_tag);
@@ -264,7 +266,7 @@ Context *RefreshRequest<I>::handle_v2_get_mutable_metadata(int *result) {
                  << "r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::get_mutable_metadata_finish(&it, &m_size, &m_features,
                                                       &m_incompatible_features,
                                                       &m_lockers,
@@ -326,7 +328,7 @@ Context *RefreshRequest<I>::handle_v2_get_metadata(int *result) {
 
   std::map<std::string, bufferlist> metadata;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::metadata_list_finish(&it, &metadata);
   }
 
@@ -381,7 +383,7 @@ Context *RefreshRequest<I>::handle_v2_get_flags(int *result) {
 
   if (*result == 0) {
     /// NOTE: remove support for snap paramter after Luminous is retired
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     cls_client::get_flags_finish(&it, &m_flags, m_snapc.snaps, &m_snap_flags);
   }
   if (*result == -EOPNOTSUPP) {
@@ -441,7 +443,7 @@ Context *RefreshRequest<I>::handle_v2_get_op_features(int *result) {
   // -EOPNOTSUPP handler not required since feature bit implies OSD
   // supports the method
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     cls_client::op_features_get_finish(&it, &m_op_features);
   } else if (*result < 0) {
     lderr(cct) << "failed to retrieve op features: " << cpp_strerror(*result)
@@ -478,7 +480,7 @@ Context *RefreshRequest<I>::handle_v2_get_group(int *result) {
                  << "r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     cls_client::image_group_get_finish(&it, &m_group_spec);
   }
   if (*result == -EOPNOTSUPP) {
@@ -528,7 +530,7 @@ Context *RefreshRequest<I>::handle_v2_get_snapshots(int *result) {
                  << "r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::snapshot_get_finish(&it, m_snapc.snaps, &m_snap_infos,
                                               &m_snap_parents,
                                               &m_snap_protection);
@@ -580,7 +582,7 @@ Context *RefreshRequest<I>::handle_v2_get_snapshots_legacy(int *result) {
   std::vector<std::string> snap_names;
   std::vector<uint64_t> snap_sizes;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::snapshot_list_finish(&it, m_snapc.snaps,
                                                &snap_names, &snap_sizes,
                                                &m_snap_parents,
@@ -634,7 +636,7 @@ Context *RefreshRequest<I>::handle_v2_get_snap_timestamps(int *result) {
 
   std::vector<utime_t> snap_timestamps;
   if (*result == 0) {
-    bufferlist::iterator it = m_out_bl.begin();
+    auto it = m_out_bl.cbegin();
     *result = cls_client::snapshot_timestamp_list_finish(&it, m_snapc.snaps,
                                                          &snap_timestamps);
   }
@@ -1076,11 +1078,15 @@ Context *RefreshRequest<I>::send_flush_aio() {
     CephContext *cct = m_image_ctx.cct;
     ldout(cct, 10) << this << " " << __func__ << dendl;
 
-    RWLock::RLocker owner_lock(m_image_ctx.owner_lock);
-    using klass = RefreshRequest<I>;
-    Context *ctx = create_context_callback<
-      klass, &klass::handle_flush_aio>(this);
-    m_image_ctx.flush(ctx);
+    RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
+    auto ctx = create_context_callback<
+      RefreshRequest<I>, &RefreshRequest<I>::handle_flush_aio>(this);
+    auto aio_comp = io::AioCompletion::create(
+      ctx, util::get_image_ctx(&m_image_ctx), io::AIO_TYPE_FLUSH);
+    auto req = io::ImageDispatchSpec<I>::create_flush_request(
+      m_image_ctx, aio_comp, io::FLUSH_SOURCE_INTERNAL, {});
+    req->send();
+    delete req;
     return nullptr;
   } else if (m_error_result < 0) {
     // propagate saved error back to caller
@@ -1126,7 +1132,6 @@ void RefreshRequest<I>::apply() {
   RWLock::WLocker md_locker(m_image_ctx.md_lock);
 
   {
-    Mutex::Locker cache_locker(m_image_ctx.cache_lock);
     RWLock::WLocker snap_locker(m_image_ctx.snap_lock);
     RWLock::WLocker parent_locker(m_image_ctx.parent_lock);
 

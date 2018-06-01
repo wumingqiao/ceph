@@ -69,7 +69,7 @@ public:
       fd = -1;
       return;
     }
-    bufferlist::iterator bliter = bl.begin();
+    auto bliter = bl.cbegin();
     uint8_t ver, ver2;
     decode(ver, bliter);
     decode(ver2, bliter);
@@ -88,7 +88,7 @@ public:
       fd = -1;
       return;
     }
-    bliter = bl.begin();
+    bliter = bl.cbegin();
     t.reset(new MonitorDBStore::Transaction);
     t->decode(bliter);
   }
@@ -339,7 +339,7 @@ int rewrite_transaction(MonitorDBStore& store, int version,
       std::cerr << err << ": " << cpp_strerror(r) << std::endl;
       return r;
     }
-    bufferlist::iterator p = bl.begin();
+    auto p = bl.cbegin();
     crush->decode(p);
   }
 
@@ -477,7 +477,7 @@ int inflate_pgmap(MonitorDBStore& st, unsigned n, bool can_be_trimmed) {
     }
     bufferlist pg_bl = i->value();
     pg_stat_t ps;
-    bufferlist::iterator p = pg_bl.begin();
+    auto p = pg_bl.cbegin();
     decode(ps, p);
     // will update the last_epoch_clean of all the pgs.
     pg_stat[pgid] = ps;
@@ -827,7 +827,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  vector<const char *> ceph_options, def_args;
+  vector<const char *> ceph_options;
   ceph_options.reserve(ceph_option_strings.size());
   for (vector<string>::iterator i = ceph_option_strings.begin();
        i != ceph_option_strings.end();
@@ -836,8 +836,9 @@ int main(int argc, char **argv) {
   }
 
   auto cct = global_init(
-    &def_args, ceph_options, CEPH_ENTITY_TYPE_MON,
-    CODE_ENVIRONMENT_UTILITY, 0);
+    NULL, ceph_options, CEPH_ENTITY_TYPE_MON,
+    CODE_ENVIRONMENT_UTILITY,
+    CINIT_FLAG_NO_MON_CONFIG);
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf->apply_changes(NULL);
   g_conf = g_ceph_context->_conf;
@@ -877,7 +878,7 @@ int main(int argc, char **argv) {
       ("version,v", po::value<unsigned>(&v),
        "map version to obtain")
       ("readable,r", po::value<bool>(&readable)->default_value(false),
-       "print the map infomation in human readable format")
+       "print the map information in human readable format")
       ;
     // this is going to be a positional argument; we don't want to show
     // it as an option during --help, but we do want to have it captured
@@ -969,14 +970,14 @@ int main(int argc, char **argv) {
           fs_map.print(ss);
         } else if (map_type == "mgr") {
           MgrMap mgr_map;
-          auto p = bl.begin();
+          auto p = bl.cbegin();
           mgr_map.decode(p);
           JSONFormatter f;
           f.dump_object("mgrmap", mgr_map);
           f.flush(ss);
         } else if (map_type == "crushmap") {
           CrushWrapper cw;
-          bufferlist::iterator it = bl.begin();
+          auto it = bl.cbegin();
           cw.decode(it);
           CrushCompiler cc(cw, std::cerr, 0);
           cc.decompile(ss);
@@ -1316,13 +1317,13 @@ int main(int argc, char **argv) {
         out_store.apply_transaction(tx);
 
       std::cout << "copied " << total_keys << " keys so far ("
-                << stringify(si_t(total_size)) << ")" << std::endl;
+                << stringify(byte_u_t(total_size)) << ")" << std::endl;
 
     } while (it->valid());
     out_store.close();
     std::cout << "summary: copied " << total_keys << " keys, using "
               << total_tx << " transactions, totalling "
-              << stringify(si_t(total_size)) << std::endl;
+              << stringify(byte_u_t(total_size)) << std::endl;
     std::cout << "from '" << store_path << "' to '" << out_path << "'"
               << std::endl;
   } else if (cmd == "rewrite-crush") {

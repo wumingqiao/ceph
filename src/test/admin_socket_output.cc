@@ -98,7 +98,7 @@ bool AdminSocketOutput::init_sockets() {
 
 std::pair<std::string, std::string>
 AdminSocketOutput::run_command(AdminSocketClient &client,
-                               const std::string raw_command,
+                               const std::string &raw_command,
                                bool send_untouched) {
   std::cout << "Sending command \"" << raw_command << "\"" << std::endl;
   std::string command;
@@ -108,7 +108,12 @@ AdminSocketOutput::run_command(AdminSocketClient &client,
   } else {
     command = "{\"prefix\":\"" + raw_command + "\"}";
   }
-  client.do_request(command, &output);
+  std::string err = client.do_request(command, &output);
+  if (!err.empty()) {
+    std::cerr << __func__  << " AdminSocketClient::do_request errored with: "
+              << err << std::endl;
+    ceph_assert(false);
+  }
   return std::make_pair(command, output);
 }
 
@@ -121,7 +126,12 @@ bool AdminSocketOutput::gather_socket_output() {
     std::cout << std::endl
               << "Sending request to " << socket << std::endl
               << std::endl;
-    client.do_request("{\"prefix\":\"help\"}", &response);
+    std::string err = client.do_request("{\"prefix\":\"help\"}", &response);
+    if (!err.empty()) {
+      std::cerr << __func__  << " AdminSocketClient::do_request errored with: "
+                << err << std::endl;
+      return false;
+    }
     std::cout << response << '\n';
 
     JSONParser parser;
@@ -178,8 +188,8 @@ bool AdminSocketOutput::gather_socket_output() {
   return true;
 }
 
-std::string AdminSocketOutput::get_result(const std::string target,
-                                          const std::string command) const {
+std::string AdminSocketOutput::get_result(const std::string &target,
+                                          const std::string &command) const {
   const auto& target_results = results.find(target);
   if (target_results == results.end())
     return std::string("");

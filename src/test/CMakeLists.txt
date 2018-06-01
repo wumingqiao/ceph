@@ -17,7 +17,6 @@ if(WITH_RBD)
   add_subdirectory(cls_rbd)
 endif(WITH_RBD)
 add_subdirectory(cls_refcount)
-add_subdirectory(cls_replica_log)
 add_subdirectory(cls_rgw)
 add_subdirectory(cls_statelog)
 add_subdirectory(cls_version)
@@ -31,9 +30,6 @@ add_subdirectory(erasure-code)
 add_subdirectory(filestore)
 add_subdirectory(fs)
 add_subdirectory(journal)
-if(WITH_EMBEDDED)
-  add_subdirectory(libcephd)
-endif(WITH_EMBEDDED)
 add_subdirectory(libcephfs)
 add_subdirectory(librados)
 add_subdirectory(librados_test_stub)
@@ -59,7 +55,7 @@ if(WITH_RBD)
   add_subdirectory(rbd_mirror)
 endif(WITH_RBD)
 add_subdirectory(system)
-if(WITH_FIO)
+if(WITH_FIO OR WITH_SYSTEM_FIO)
   add_subdirectory(fio)
 endif()
 
@@ -102,6 +98,11 @@ target_link_libraries(test_build_libcommon ceph-common pthread ${CRYPTO_LIBS} ${
 if(WITH_RADOSGW)
   add_executable(test_build_librgw buildtest_skeleton.cc)
   target_link_libraries(test_build_librgw rgw_a pthread ${CRYPTO_LIBS} ${EXTRALIBS})
+endif(WITH_RADOSGW)
+
+if(WITH_RADOSGW)
+  add_executable(test_build_librgw_admin_user buildtest_skeleton.cc)
+  target_link_libraries(test_build_librgw_admin_user pthread ${CRYPTO_LIBS} ${EXTRALIBS})
 endif(WITH_RADOSGW)
 
 if(WITH_LIBCEPHFS)
@@ -387,6 +388,18 @@ target_link_libraries(test_rgw_ldap
   ${UNITTEST_LIBS}
   )
 
+# unittest_librgw_admin_user
+add_executable(ceph_test_librgw_admin_user test_librgw_admin_user.cc)
+set_target_properties(ceph_test_librgw_admin_user PROPERTIES COMPILE_FLAGS ${UNITTEST_CXX_FLAGS})
+target_link_libraries(ceph_test_librgw_admin_user
+  rgw_admin_user
+  cls_otp_client
+  librados
+  ceph-common
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+   )
+
 endif(${WITH_RADOSGW})
 
 # ceph_multi_stress_watch
@@ -524,8 +537,6 @@ install(TARGETS
 #following dependencies are run inside make check unit tests
 add_dependencies(tests
   ceph-mon
-  ceph-mgr
-  ceph
   ceph-authtool
   get_command_descriptions
   crushtool
@@ -547,6 +558,9 @@ add_dependencies(tests
   ceph_erasure_code
   ceph-disk
   cython_modules)
+if(WITH_MGR)
+  add_dependencies(tests ceph-mgr)
+endif()
 if(WITH_RBD)
   add_dependencies(tests unittest_librbd rbd)
   if(FREEBSD)
@@ -554,7 +568,7 @@ if(WITH_RBD)
   endif(FREEBSD)
 endif(WITH_RBD)
 if(WITH_RADOSGW)
-  add_dependencies(tests radosgw-admin)
+  add_dependencies(tests radosgw radosgw-admin)
 endif(WITH_RADOSGW)
 if(NOT FREEBSD)
   add_dependencies(tests ceph-detect-init)
@@ -582,10 +596,8 @@ add_test(NAME run-tox-ceph-detect-init COMMAND bash ${CMAKE_SOURCE_DIR}/src/ceph
 set(CEPH_DISK_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/ceph-disk-virtualenv)
 set(CEPH_DETECT_INIT_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/ceph-detect-init-virtualenv)
 
-set_property(TEST 
-  run-tox-ceph-disk
-  run-tox-ceph-detect-init
-  PROPERTY ENVIRONMENT
+set(tox_tests run-tox-ceph-disk run-tox-ceph-detect-init)
+set(env_vars_for_tox_tests
   CEPH_BUILD_DIR=${CMAKE_BINARY_DIR}
   CEPH_ROOT=${CMAKE_SOURCE_DIR}
   CEPH_BIN=${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
@@ -596,7 +608,19 @@ set_property(TEST
   LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/lib
   PATH=$ENV{PATH}:${CMAKE_RUNTIME_OUTPUT_DIRECTORY}:${CMAKE_SOURCE_DIR}/src
   PYTHONPATH=${CMAKE_SOURCE_DIR}/src/pybind
-  )
+  WITH_PYTHON2=${WITH_PYTHON2}
+  WITH_PYTHON3=${WITH_PYTHON3})
+
+if(WITH_MGR)
+  add_test(NAME run-tox-mgr-dashboard COMMAND bash ${CMAKE_SOURCE_DIR}/src/pybind/mgr/dashboard/run-tox.sh)
+  list(APPEND tox_tests run-tox-mgr-dashboard)
+  set(MGR_DASHBOARD_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-dashboard-virtualenv)
+  list(APPEND env_vars_for_tox_tests MGR_DASHBOARD_VIRTUALENV=${MGR_DASHBOARD_VIRTUALENV})
+endif()
+
+set_property(
+  TEST ${tox_tests}
+  PROPERTY ENVIRONMENT ${env_vars_for_tox_tests})
 
 # unittest_admin_socket
 add_executable(unittest_admin_socket
@@ -735,7 +759,7 @@ add_executable(unittest_denc
   test_denc.cc
   )
 add_ceph_unittest(unittest_denc)
-target_link_libraries(unittest_denc os global)
+target_link_libraries(unittest_denc global)
 
 # unittest_mempool
 add_executable(unittest_mempool
@@ -903,5 +927,9 @@ add_executable(unittest_pageset test_pageset.cc)
 add_ceph_unittest(unittest_pageset)
 target_link_libraries(unittest_pageset global)
 
-#make check ends here
+# unittest_any_
+add_executable(unittest_any test_any.cc)
+add_ceph_unittest(unittest_any)
+target_link_libraries(unittest_any)
 
+#make check ends here

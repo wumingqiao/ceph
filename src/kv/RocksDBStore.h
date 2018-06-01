@@ -71,6 +71,7 @@ class RocksDBStore : public KeyValueDB {
   CephContext *cct;
   PerfCounters *logger;
   string path;
+  map<string,string> kv_options;
   void *priv;
   rocksdb::DB *db;
   rocksdb::Env *env;
@@ -119,6 +120,10 @@ public:
   bool enable_rmrange;
   void compact() override;
 
+  void compact_async() override {
+    compact_range_async(string(), string());
+  }
+
   int tryInterpret(const string& key, const string& val, rocksdb::Options &opt);
   int ParseOptionsFromString(const string& opt_str, rocksdb::Options &opt);
   static int _test_init(const string& dir);
@@ -138,10 +143,11 @@ public:
     compact_range_async(combine_strings(prefix, start), combine_strings(prefix, end));
   }
 
-  RocksDBStore(CephContext *c, const string &path, void *p) :
+  RocksDBStore(CephContext *c, const string &path, map<string,string> opt, void *p) :
     cct(c),
     logger(NULL),
     path(path),
+    kv_options(opt),
     priv(p),
     db(NULL),
     env(static_cast<rocksdb::Env*>(p)),

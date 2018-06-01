@@ -31,7 +31,9 @@ class MappingState:
         self.pg_stat = {
             i['pgid']: i['stat_sum'] for i in pg_dump.get('pg_stats', [])
         }
-        self.poolids = [p['pool'] for p in self.osdmap_dump.get('pools', [])]
+        osd_poolids = [p['pool'] for p in self.osdmap_dump.get('pools', [])]
+        pg_poolids = [p['poolid'] for p in pg_dump.get('pool_stats', [])]
+        self.poolids = set(osd_poolids) & set(pg_poolids)
         self.pg_up = {}
         self.pg_up_by_poolid = {}
         for poolid in self.poolids:
@@ -141,6 +143,15 @@ class Eval:
         num = max(len(target), 1)
         r = {}
         for t in ('pgs', 'objects', 'bytes'):
+            if total[t] == 0:
+                r[t] = {
+                    'avg': 0,
+                    'stddev': 0,
+                    'sum_weight': 0,
+                    'score': 0,
+                }
+                continue
+
             avg = float(total[t]) / float(num)
             dev = 0.0
 
@@ -190,6 +201,20 @@ class Eval:
         return r
 
 class Module(MgrModule):
+    OPTIONS = [
+            {'name': 'active'},
+            {'name': 'begin_time'},
+            {'name': 'crush_compat_max_iterations'},
+            {'name': 'crush_compat_step'},
+            {'name': 'end_time'},
+            {'name': 'max_misplaced'},
+            {'name': 'min_score'},
+            {'name': 'mode'},
+            {'name': 'sleep_interval'},
+            {'name': 'upmap_max_iterations'},
+            {'name': 'upmap_max_deviation'},
+    ]
+
     COMMANDS = [
         {
             "cmd": "balancer status",
@@ -244,6 +269,11 @@ class Module(MgrModule):
         {
             "cmd": "balancer dump name=plan,type=CephString",
             "desc": "Show an optimization plan",
+            "perm": "r",
+        },
+        {
+            "cmd": "balancer ls",
+            "desc": "List all plans",
             "perm": "r",
         },
         {
@@ -332,6 +362,8 @@ class Module(MgrModule):
         elif command['prefix'] == 'balancer reset':
             self.plans = {}
             return (0, '', '')
+        elif command['prefix'] == 'balancer ls':
+            return (0, json.dumps([p for p in self.plans], indent=4), '')
         elif command['prefix'] == 'balancer dump':
             plan = self.plans.get(command['plan'])
             if not plan:
@@ -408,6 +440,9 @@ class Module(MgrModule):
         for p in ms.osdmap_dump.get('pools',[]):
             if len(pools) and p['pool_name'] not in pools:
                 continue
+            # skip dead or not-yet-ready pools too
+            if p['pool'] not in ms.poolids:
+                continue
             pe.pool_name[p['pool']] = p['pool_name']
             pe.pool_id[p['pool_name']] = p['pool']
             pool_rule[p['pool_name']] = p['crush_rule']
@@ -421,7 +456,7 @@ class Module(MgrModule):
         self.log.debug('pool_rule %s' % pool_rule)
 
         osd_weight = { a['osd']: a['weight']
-                       for a in ms.osdmap_dump.get('osds',[]) }
+                       for a in ms.osdmap_dump.get('osds',[]) if a['weight'] > 0 }
 
         # get expected distributions by root
         actual_by_root = {}
@@ -445,10 +480,11 @@ class Module(MgrModule):
             roots.append(root)
             weight_map = ms.crush.get_take_weight_osd_map(rootid)
             adjusted_map = {
-                osd: cw * osd_weight.get(osd, 1.0)
-                for osd,cw in weight_map.iteritems()
+                osd: cw * osd_weight[osd]
+                for osd,cw in weight_map.iteritems() if osd in osd_weight and cw > 0
             }
-            sum_w = sum(adjusted_map.values()) or 1.0
+            sum_w = sum(adjusted_map.values())
+            assert len(adjusted_map) == 0 or sum_w > 0
             pe.target_by_root[root] = { osd: w / sum_w
                                         for osd,w in adjusted_map.iteritems() }
             actual_by_root[root] = {
@@ -540,7 +576,7 @@ class Module(MgrModule):
                 'objects': objects,
                 'bytes': bytes,
             }
-        for root, m in pe.total_by_root.iteritems():
+        for root in pe.total_by_root.iterkeys():
             pe.count_by_root[root] = {
                 'pgs': {
                     k: float(v)
@@ -732,11 +768,13 @@ class Module(MgrModule):
         for root, wm in pe.target_by_root.iteritems():
             for osd in wm.iterkeys():
                 if osd in visited:
-                    overlap[osd] = 1
-                visited[osd] = 1
+                    if osd not in overlap:
+                        overlap[osd] = [ visited[osd] ]
+                    overlap[osd].append(root)
+                visited[osd] = root
         if len(overlap) > 0:
             detail = 'Some osds belong to multiple subtrees: %s' % \
-                     overlap.keys()
+                     overlap
             self.log.error(detail)
             return -errno.EOPNOTSUPP, detail
 

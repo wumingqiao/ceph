@@ -11,6 +11,8 @@
 #include "messages/MStatfsReply.h"
 #include "messages/MServiceMap.h"
 
+#include "include/assert.h"	// re-clobber assert
+
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mon)
@@ -45,7 +47,7 @@ void MgrStatMonitor::update_from_paxos(bool *need_bootstrap)
   if (version) {
     assert(bl.length());
     try {
-      auto p = bl.begin();
+      auto p = bl.cbegin();
       decode(digest, p);
       decode(service_map, p);
       dout(10) << __func__ << " v" << version
@@ -173,6 +175,7 @@ bool MgrStatMonitor::prepare_update(MonOpRequestRef op)
 
 bool MgrStatMonitor::preprocess_report(MonOpRequestRef op)
 {
+  mon->no_reply(op);
   return false;
 }
 
@@ -180,7 +183,7 @@ bool MgrStatMonitor::prepare_report(MonOpRequestRef op)
 {
   auto m = static_cast<MMonMgrReport*>(op->get_req());
   bufferlist bl = m->get_data();
-  auto p = bl.begin();
+  auto p = bl.cbegin();
   decode(pending_digest, p);
   pending_health_checks.swap(m->health_checks);
   if (m->service_map_bl.length()) {
@@ -190,7 +193,16 @@ bool MgrStatMonitor::prepare_report(MonOpRequestRef op)
 	   << pending_health_checks.checks.size() << " health checks" << dendl;
   dout(20) << "pending_digest:\n";
   JSONFormatter jf(true);
+  jf.open_object_section("pending_digest");
   pending_digest.dump(&jf);
+  jf.close_section();
+  jf.flush(*_dout);
+  *_dout << dendl;
+  dout(20) << "health checks:\n";
+  JSONFormatter jf(true);
+  jf.open_object_section("health_checks");
+  pending_health_checks.dump(&jf);
+  jf.close_section();
   jf.flush(*_dout);
   *_dout << dendl;
   return true;

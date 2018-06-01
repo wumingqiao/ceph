@@ -174,7 +174,7 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
   uint64_t src_size;
   {
     RWLock::RLocker snap_locker(src->snap_lock);
-    features = src->features;
+    features = (src->features & ~RBD_FEATURES_IMPLICIT_ENABLE);
     src_size = src->get_image_size(src->snap_id);
   }
   uint64_t format = 2;
@@ -205,8 +205,15 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
     return -ENOSYS;
   }
 
+  uint64_t flatten = 0;
+  if (opts.get(RBD_IMAGE_OPTION_FLATTEN, &flatten) == 0) {
+    opts.unset(RBD_IMAGE_OPTION_FLATTEN);
+  }
+
   ParentSpec parent_spec;
-  {
+  if (flatten > 0) {
+    parent_spec.pool_id = -1;
+  } else {
     RWLock::RLocker snap_locker(src->snap_lock);
     RWLock::RLocker parent_locker(src->parent_lock);
 
@@ -240,19 +247,9 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
       }
       return r;
     }
-    std::string snap_name;
-    {
-      RWLock::RLocker parent_snap_locker(src_parent_image_ctx->snap_lock);
-      auto it = src_parent_image_ctx->snap_info.find(parent_spec.snap_id);
-      if (it == src_parent_image_ctx->snap_info.end()) {
-        return -ENOENT;
-      }
-      snap_name = it->second.name;
-    }
 
     C_SaferCond cond;
-    src_parent_image_ctx->state->snap_set(cls::rbd::UserSnapshotNamespace(),
-                                          snap_name, &cond);
+    src_parent_image_ctx->state->snap_set(parent_spec.snap_id, &cond);
     r = cond.wait();
     if (r < 0) {
       if (r != -ENOENT) {
@@ -307,7 +304,7 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
     return r;
   }
 
-  r = deep_copy(src, dest, prog_ctx);
+  r = deep_copy(src, dest, flatten > 0, prog_ctx);
 
   int close_r = dest->state->close();
   if (r == 0 && close_r < 0) {
@@ -317,7 +314,8 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
 }
 
 template <typename I>
-int Image<I>::deep_copy(I *src, I *dest, ProgressContext &prog_ctx) {
+int Image<I>::deep_copy(I *src, I *dest, bool flatten,
+                        ProgressContext &prog_ctx) {
   CephContext *cct = src->cct;
   librados::snap_t snap_id_start = 0;
   librados::snap_t snap_id_end;
@@ -333,11 +331,59 @@ int Image<I>::deep_copy(I *src, I *dest, ProgressContext &prog_ctx) {
   C_SaferCond cond;
   SnapSeqs snap_seqs;
   auto req = DeepCopyRequest<>::create(src, dest, snap_id_start, snap_id_end,
-                                       boost::none, op_work_queue, &snap_seqs,
-                                       &prog_ctx, &cond);
+                                       flatten, boost::none, op_work_queue,
+                                       &snap_seqs, &prog_ctx, &cond);
   req->send();
   int r = cond.wait();
   if (r < 0) {
+    return r;
+  }
+
+  return 0;
+}
+
+template <typename I>
+int Image<I>::snap_set(I *ictx,
+                       const cls::rbd::SnapshotNamespace &snap_namespace,
+                       const char *snap_name) {
+  ldout(ictx->cct, 20) << "snap_set " << ictx << " snap = "
+                       << (snap_name ? snap_name : "NULL") << dendl;
+
+  // ignore return value, since we may be set to a non-existent
+  // snapshot and the user is trying to fix that
+  ictx->state->refresh_if_required();
+
+  uint64_t snap_id = CEPH_NOSNAP;
+  std::string name(snap_name == nullptr ? "" : snap_name);
+  if (!name.empty()) {
+    RWLock::RLocker snap_locker(ictx->snap_lock);
+    snap_id = ictx->get_snap_id(cls::rbd::UserSnapshotNamespace{},
+                                snap_name);
+    if (snap_id == CEPH_NOSNAP) {
+      return -ENOENT;
+    }
+  }
+
+  return snap_set(ictx, snap_id);
+}
+
+template <typename I>
+int Image<I>::snap_set(I *ictx, uint64_t snap_id) {
+  ldout(ictx->cct, 20) << "snap_set " << ictx << " "
+                       << "snap_id=" << snap_id << dendl;
+
+  // ignore return value, since we may be set to a non-existent
+  // snapshot and the user is trying to fix that
+  ictx->state->refresh_if_required();
+
+  C_SaferCond ctx;
+  ictx->state->snap_set(snap_id, &ctx);
+  int r = ctx.wait();
+  if (r < 0) {
+    if (r != -ENOENT) {
+      lderr(ictx->cct) << "failed to " << (snap_id == CEPH_NOSNAP ? "un" : "")
+                       << "set snapshot: " << cpp_strerror(r) << dendl;
+    }
     return r;
   }
 

@@ -200,6 +200,7 @@ using ceph::crypto::MD5;
 #define ERR_NO_SUCH_LC           2041
 #define ERR_NO_SUCH_USER         2042
 #define ERR_NO_SUCH_SUBUSER      2043
+#define ERR_MFA_REQUIRED         2044
 #define ERR_USER_SUSPENDED       2100
 #define ERR_INTERNAL_ERROR       2200
 #define ERR_NOT_IMPLEMENTED      2201
@@ -282,6 +283,11 @@ enum RGWObjCategory {
   RGW_OBJ_CATEGORY_MULTIMETA = 3,
 };
 
+enum HostStyle {
+  PathStyle = 0,
+  VirtualStyle = 1,
+};
+
 /** Store error returns for output at a different point in the program */
 struct rgw_err {
   rgw_err();
@@ -314,8 +320,7 @@ class NameVal
 };
 
 /** Stores the XML arguments associated with the HTTP request in req_state*/
-class RGWHTTPArgs
-{
+class RGWHTTPArgs {
   string str, empty_str;
   map<string, string> val_map;
   map<string, string> sys_val_map;
@@ -374,7 +379,7 @@ class RGWHTTPArgs
   const string& get_str() {
     return str;
   }
-};
+}; // RGWHTTPArgs
 
 const char *rgw_conf_get(const map<string, string, ltstr_nocase>& conf_map, const char *name, const char *def_val);
 int rgw_conf_get_int(const map<string, string, ltstr_nocase>& conf_map, const char *name, int def_val);
@@ -526,7 +531,7 @@ struct RGWAccessKey {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
      DECODE_START_LEGACY_COMPAT_LEN_32(2, 2, 2, bl);
      decode(id, bl);
      decode(key, bl);
@@ -555,7 +560,7 @@ struct RGWSubUser {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
      DECODE_START_LEGACY_COMPAT_LEN_32(2, 2, 2, bl);
      decode(name, bl);
      decode(perm_mask, bl);
@@ -586,7 +591,7 @@ public:
      encode(caps, bl);
      ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
      DECODE_START(1, bl);
      decode(caps, bl);
      DECODE_FINISH(bl);
@@ -634,6 +639,7 @@ struct RGWUserInfo
   map<int, string> temp_url_keys;
   RGWQuotaInfo user_quota;
   uint32_t type;
+  set<string> mfa_ids;
 
   RGWUserInfo()
     : auid(0),
@@ -653,7 +659,7 @@ struct RGWUserInfo
   }
 
   void encode(bufferlist& bl) const {
-     ENCODE_START(19, 9, bl);
+     ENCODE_START(20, 9, bl);
      encode(auid, bl);
      string access_key;
      string secret_key;
@@ -694,10 +700,11 @@ struct RGWUserInfo
      encode(user_id.tenant, bl);
      encode(admin, bl);
      encode(type, bl);
+     encode(mfa_ids, bl);
      ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
-     DECODE_START_LEGACY_COMPAT_LEN_32(19, 9, 9, bl);
+  void decode(bufferlist::const_iterator& bl) {
+     DECODE_START_LEGACY_COMPAT_LEN_32(20, 9, 9, bl);
      if (struct_v >= 2) decode(auid, bl);
      else auid = CEPH_AUTH_UID_DEFAULT;
      string access_key;
@@ -770,6 +777,9 @@ struct RGWUserInfo
     if (struct_v >= 19) {
       decode(type, bl);
     }
+    if (struct_v >= 20) {
+      decode(mfa_ids, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
@@ -817,9 +827,9 @@ struct rgw_pool {
     ENCODE_FINISH(bl);
   }
 
-  void decode_from_bucket(bufferlist::iterator& bl);
+  void decode_from_bucket(bufferlist::const_iterator& bl);
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START_LEGACY_COMPAT_LEN(10, 3, 3, bl);
 
     decode(name, bl);
@@ -937,9 +947,9 @@ struct rgw_raw_obj {
     ENCODE_FINISH(bl);
   }
 
-  void decode_from_rgw_obj(bufferlist::iterator& bl);
+  void decode_from_rgw_obj(bufferlist::const_iterator& bl);
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     unsigned ofs = bl.get_off();
     DECODE_START(6, bl);
     if (struct_v < 6) {
@@ -1030,7 +1040,7 @@ struct rgw_bucket {
     }
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START_LEGACY_COMPAT_LEN(10, 3, 3, bl);
     decode(name, bl);
     if (struct_v < 10) {
@@ -1042,7 +1052,7 @@ struct rgw_bucket {
         uint64_t id;
         decode(id, bl);
         char buf[16];
-        snprintf(buf, sizeof(buf), "%llu", (long long)id);
+        snprintf(buf, sizeof(buf), "%" PRIu64, id);
         bucket_id = buf;
       } else {
         decode(bucket_id, bl);
@@ -1109,7 +1119,7 @@ struct rgw_bucket {
 WRITE_CLASS_ENCODER(rgw_bucket)
 
 inline ostream& operator<<(ostream& out, const rgw_bucket &b) {
-  out << b.name << "[" << b.marker << "])";
+  out << b.name << "[" << b.marker << "]";
   return out;
 }
 
@@ -1178,6 +1188,7 @@ enum RGWBucketFlags {
   BUCKET_VERSIONED = 0x2,
   BUCKET_VERSIONS_SUSPENDED = 0x4,
   BUCKET_DATASYNC_DISABLED = 0X8,
+  BUCKET_MFA_ENABLED = 0X10,
 };
 
 enum RGWBucketIndexType {
@@ -1197,8 +1208,7 @@ inline ostream& operator<<(ostream& out, const RGWBucketIndexType &index_type)
   }
 }
 
-struct RGWBucketInfo
-{
+struct RGWBucketInfo {
   enum BIShardsHashType {
     MOD = 0
   };
@@ -1272,7 +1282,7 @@ struct RGWBucketInfo
      encode(new_bucket_instance_id, bl);
      ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START_LEGACY_COMPAT_LEN_32(19, 4, 4, bl);
      decode(bucket, bl);
      if (struct_v >= 2) {
@@ -1345,8 +1355,9 @@ struct RGWBucketInfo
   void decode_json(JSONObj *obj);
 
   bool versioned() const { return (flags & BUCKET_VERSIONED) != 0; }
-  int versioning_status() { return flags & (BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED); }
-  bool versioning_enabled() { return versioning_status() == BUCKET_VERSIONED; }
+  int versioning_status() { return flags & (BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED | BUCKET_MFA_ENABLED); }
+  bool versioning_enabled() { return (versioning_status() & (BUCKET_VERSIONED | BUCKET_VERSIONS_SUSPENDED)) == BUCKET_VERSIONED; }
+  bool mfa_enabled() { return (versioning_status() & BUCKET_MFA_ENABLED) != 0; }
   bool datasync_flag_enabled() const { return (flags & BUCKET_DATASYNC_DISABLED) == 0; }
 
   bool has_swift_versioning() const {
@@ -1382,8 +1393,8 @@ struct RGWBucketEntryPoint
     encode(creation_time, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
-    bufferlist::iterator orig_iter = bl;
+  void decode(bufferlist::const_iterator& bl) {
+    auto orig_iter = bl;
     DECODE_START_LEGACY_COMPAT_LEN_32(10, 4, 4, bl);
     if (struct_v < 8) {
       /* ouch, old entry, contains the bucket info itself */
@@ -1722,7 +1733,7 @@ struct rgw_obj_key {
     encode(ns, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START(2, bl);
     decode(name, bl);
     decode(instance, bl);
@@ -1758,33 +1769,29 @@ struct req_init_state {
   string src_bucket;
 };
 
-/* XXX why don't RGWRequest (or descendants) hold this state? */
-class RGWRequest;
-
 #include "rgw_auth.h"
 
 /** Store all the state necessary to complete and respond to an HTTP request*/
-struct req_state {
+struct req_state : DoutPrefixProvider {
   CephContext *cct;
-  rgw::io::BasicClient *cio;
-  RGWRequest *req{nullptr}; /// XXX: re-remove??
-  http_op op;
+  rgw::io::BasicClient *cio{nullptr};
+  http_op op{OP_UNKNOWN};
   RGWOpType op_type{};
-  bool content_started;
-  int format;
-  ceph::Formatter *formatter;
+  bool content_started{false};
+  int format{0};
+  ceph::Formatter *formatter{nullptr};
   string decoded_uri;
   string relative_uri;
-  const char *length;
-  int64_t content_length;
+  const char *length{nullptr};
+  int64_t content_length{0};
   map<string, string> generic_attrs;
   rgw_err err;
-  bool expect_cont;
-  uint64_t obj_size;
+  bool expect_cont{false};
+  uint64_t obj_size{0};
   bool enable_ops_log;
   bool enable_usage_log;
   uint8_t defer_to_bucket_acls;
-  uint32_t perm_mask;
+  uint32_t perm_mask{0};
 
   /* Set once when url_bucket is parsed and not violated thereafter. */
   string account_name;
@@ -1803,16 +1810,17 @@ struct req_state {
   string zonegroup_name;
   string zonegroup_endpoint;
   string bucket_instance_id;
-  int bucket_instance_shard_id;
+  int bucket_instance_shard_id{-1};
   string redirect_zone_endpoint;
 
   string redirect;
 
   RGWBucketInfo bucket_info;
-  map<string, bufferlist> bucket_attrs;
-  bool bucket_exists;
+  real_time bucket_mtime;
+  std::map<std::string, ceph::bufferlist> bucket_attrs;
+  bool bucket_exists{false};
 
-  bool has_bad_meta;
+  bool has_bad_meta{false};
 
   RGWUserInfo *user;
 
@@ -1855,13 +1863,13 @@ struct req_state {
 
   /* Is the request made by an user marked as a system one?
    * Being system user means we also have the admin status. */
-  bool system_request;
+  bool system_request{false};
 
   string canned_acl;
-  bool has_acl_header;
-  bool local_source; /* source is local */
+  bool has_acl_header{false};
+  bool local_source{false}; /* source is local */
 
-  int prot_flags;
+  int prot_flags{0};
 
   /* Content-Disposition override for TempURL of Swift API. */
   struct {
@@ -1874,16 +1882,28 @@ struct req_state {
   req_info info;
   req_init_state init_state;
 
-  utime_t time;
-  void *obj_ctx;
+  using Clock = ceph::coarse_real_clock;
+  Clock::time_point time;
+
+  Clock::duration time_elapsed() const { return Clock::now() - time; }
+
+  void *obj_ctx{nullptr};
   string dialect;
   string req_id;
   string trans_id;
+  uint64_t id;
 
-  req_state(CephContext* _cct, RGWEnv* e, RGWUserInfo* u);
+  bool mfa_verified{false};
+
+  req_state(CephContext* _cct, RGWEnv* e, RGWUserInfo* u, uint64_t id);
   ~req_state();
 
   bool is_err() const { return err.is_err(); }
+
+  // implements DoutPrefixProvider
+  std::ostream& gen_prefix(std::ostream& out) const override;
+  CephContext* get_cct() const override { return cct; }
+  unsigned get_subsys() const override { return ceph_subsys_rgw; }
 };
 
 void set_req_state_err(struct req_state*, int);
@@ -1945,7 +1965,7 @@ struct RGWBucketEnt {
     encode(placement_rule, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START_LEGACY_COMPAT_LEN(6, 5, 5, bl);
     __u32 mt;
     uint64_t s;
@@ -2037,7 +2057,7 @@ struct rgw_obj {
 //    encode(placement_id, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
     if (struct_v < 6) {
       string s;
@@ -2061,7 +2081,7 @@ struct rgw_obj {
           if (pos < 0) {
             throw buffer::error();
           }
-          key.name = key.name.substr(pos);
+          key.name = key.name.substr(pos + 1);
         }
       }
     } else {
@@ -2175,7 +2195,8 @@ static inline int rgw_str_to_bool(const char *s, int def_val)
   if (!s)
     return def_val;
 
-  return (strcasecmp(s, "on") == 0 ||
+  return (strcasecmp(s, "true") == 0 ||
+          strcasecmp(s, "on") == 0 ||
           strcasecmp(s, "yes") == 0 ||
           strcasecmp(s, "1") == 0);
 }
@@ -2290,9 +2311,9 @@ extern bool verify_object_permission_no_policy(struct req_state *s,
 extern void rgw_uri_escape_char(char c, string& dst);
 extern std::string url_decode(const boost::string_view& src_str,
                               bool in_query = false);
-extern void url_encode(const std::string& src,
-                       string& dst);
-extern std::string url_encode(const std::string& src);
+extern void url_encode(const std::string& src, string& dst,
+                       bool encode_slash = true);
+extern std::string url_encode(const std::string& src, bool encode_slash = true);
 /* destination should be CEPH_CRYPTO_HMACSHA1_DIGESTSIZE bytes long */
 extern void calc_hmac_sha1(const char *key, int key_len,
                           const char *msg, int msg_len, char *dest);
@@ -2375,5 +2396,8 @@ extern bool match_policy(boost::string_view pattern, boost::string_view input,
 
 extern string camelcase_dash_http_attr(const string& orig);
 extern string lowercase_dash_http_attr(const string& orig);
+
+void rgw_setup_saved_curl_handles();
+void rgw_release_all_curl_handles();
 
 #endif

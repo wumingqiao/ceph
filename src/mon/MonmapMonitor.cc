@@ -230,7 +230,7 @@ bool MonmapMonitor::preprocess_command(MonOpRequestRef op)
   bufferlist rdata;
   stringstream ss;
 
-  map<string, cmd_vartype> cmdmap;
+  cmdmap_t cmdmap;
   if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
     string rs = ss.str();
     mon->reply_command(op, -EINVAL, rs, rdata, get_last_committed());
@@ -422,7 +422,7 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
   string rs;
   int err = -EINVAL;
 
-  map<string, cmd_vartype> cmdmap;
+  cmdmap_t cmdmap;
   if (!cmdmap_from_json(m->cmd, &cmdmap, ss)) {
     string rs = ss.str();
     mon->reply_command(op, -EINVAL, rs, get_last_committed());
@@ -672,11 +672,29 @@ bool MonmapMonitor::prepare_command(MonOpRequestRef op)
     pending_map.last_changed = ceph_clock_now();
     propose = true;
 
-    dout(1) << __func__ << ss.str() << "; new features will be: "
+    dout(1) << __func__ << " " << ss.str() << "; new features will be: "
             << "persistent = " << pending_map.persistent_features
             // output optional nevertheless, for auditing purposes.
             << ", optional = " << pending_map.optional_features << dendl;
-    
+
+  } else if (prefix == "mon set-rank") {
+    string name;
+    int64_t rank;
+    if (!cmd_getval(g_ceph_context, cmdmap, "name", name) ||
+	!cmd_getval(g_ceph_context, cmdmap, "rank", rank)) {
+      err = -EINVAL;
+      goto reply;
+    }
+    int oldrank = pending_map.get_rank(name);
+    if (oldrank < 0) {
+      ss << "mon." << name << " does not exist in monmap";
+      err = -ENOENT;
+      goto reply;
+    }
+    err = 0;
+    pending_map.set_rank(name, rank);
+    pending_map.last_changed = ceph_clock_now();
+    propose = true;
   } else {
     ss << "unknown command " << prefix;
     err = -EINVAL;

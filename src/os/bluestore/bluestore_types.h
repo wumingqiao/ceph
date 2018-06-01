@@ -40,7 +40,7 @@ struct bluestore_bdev_label_t {
   map<string,string> meta; ///< {read,write}_meta() content from ObjectStore
 
   void encode(bufferlist& bl) const;
-  void decode(bufferlist::iterator& p);
+  void decode(bufferlist::const_iterator& p);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<bluestore_bdev_label_t*>& o);
 };
@@ -123,7 +123,7 @@ struct denc_traits<PExtentVector> {
       denc(i, p);
     }
   }
-  static void decode(PExtentVector& v, bufferptr::iterator& p) {
+  static void decode(PExtentVector& v, bufferptr::const_iterator& p) {
     unsigned num;
     denc_varint(num, p);
     v.clear();
@@ -176,22 +176,21 @@ struct bluestore_extent_ref_map_t {
     }
   }
   void encode(bufferlist::contiguous_appender& p) const {
-    uint32_t n = ref_map.size();
+    const uint32_t n = ref_map.size();
     denc_varint(n, p);
     if (n) {
       auto i = ref_map.begin();
       denc_varint_lowz(i->first, p);
       i->second.encode(p);
       int64_t pos = i->first;
-      while (--n) {
-	++i;
+      while (++i != ref_map.end()) {
 	denc_varint_lowz((int64_t)i->first - pos, p);
 	i->second.encode(p);
 	pos = i->first;
       }
     }
   }
-  void decode(bufferptr::iterator& p) {
+  void decode(bufferptr::const_iterator& p) {
     uint32_t n;
     denc_varint(n, p);
     if (n) {
@@ -388,7 +387,7 @@ struct bluestore_blob_use_tracker_t {
       }
     }
   }
-  void decode(bufferptr::iterator& p) {
+  void decode(bufferptr::const_iterator& p) {
     clear();
     denc_varint(au_size, p);
     if (au_size) {
@@ -444,6 +443,9 @@ public:
   const PExtentVector& get_extents() const {
     return extents;
   }
+  PExtentVector& dirty_extents() {
+    return extents;
+  }
 
   DENC_HELPERS;
   void bound_encode(size_t& p, uint64_t struct_v) const {
@@ -479,7 +481,7 @@ public:
     }
   }
 
-  void decode(bufferptr::iterator& p, uint64_t struct_v) {
+  void decode(bufferptr::const_iterator& p, uint64_t struct_v) {
     assert(struct_v == 1 || struct_v == 2);
     denc(extents, p);
     denc_varint(flags, p);
@@ -852,6 +854,9 @@ struct bluestore_shared_blob_t {
   bluestore_extent_ref_map_t ref_map;  ///< shared blob extents
 
   bluestore_shared_blob_t(uint64_t _sbid) : sbid(_sbid) {}
+  bluestore_shared_blob_t(uint64_t _sbid,
+			  bluestore_extent_ref_map_t&& _ref_map ) 
+    : sbid(_sbid), ref_map(std::move(_ref_map)) {}
 
   DENC(bluestore_shared_blob_t, v, p) {
     DENC_START(1, 1, p);

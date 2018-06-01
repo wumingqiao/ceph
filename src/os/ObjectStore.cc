@@ -25,10 +25,10 @@
 #endif
 #include "kstore/KStore.h"
 
-void decode_str_str_map_to_bl(bufferlist::iterator& p,
+void decode_str_str_map_to_bl(bufferlist::const_iterator& p,
 			      bufferlist *out)
 {
-  bufferlist::iterator start = p;
+  auto start = p;
   __u32 n;
   decode(n, p);
   unsigned len = 4;
@@ -44,10 +44,10 @@ void decode_str_str_map_to_bl(bufferlist::iterator& p,
   start.copy(len, *out);
 }
 
-void decode_str_set_to_bl(bufferlist::iterator& p,
+void decode_str_set_to_bl(bufferlist::const_iterator& p,
 			  bufferlist *out)
 {
-  bufferlist::iterator start = p;
+  auto start = p;
   __u32 n;
   decode(n, p);
   unsigned len = 4;
@@ -158,42 +158,4 @@ int ObjectStore::read_meta(const std::string& key,
 ostream& operator<<(ostream& out, const ObjectStore::Transaction& tx) {
 
   return out << "Transaction(" << &tx << ")"; 
-}
-
-unsigned ObjectStore::apply_transactions(CollectionHandle& ch,
-					 vector<Transaction>& tls,
-					 Context *ondisk)
-{
-  // use op pool
-  Cond my_cond;
-  Mutex my_lock("ObjectStore::apply_transaction::my_lock");
-  int r = 0;
-  bool done;
-  C_SafeCond *onreadable = new C_SafeCond(&my_lock, &my_cond, &done, &r);
-
-  queue_transactions(ch, tls, onreadable, ondisk);
-
-  my_lock.Lock();
-  while (!done)
-    my_cond.Wait(my_lock);
-  my_lock.Unlock();
-  return r;
-}
-
-int ObjectStore::queue_transactions(
-  CollectionHandle& ch,
-  vector<Transaction>& tls,
-  Context *onreadable,
-  Context *oncommit,
-  Context *onreadable_sync,
-  Context *oncomplete,
-  TrackedOpRef op = TrackedOpRef())
-{
-  RunOnDeleteRef _complete (std::make_shared<RunOnDelete>(oncomplete));
-  Context *_onreadable = new Wrapper<RunOnDeleteRef>(
-    onreadable, _complete);
-  Context *_oncommit = new Wrapper<RunOnDeleteRef>(
-    oncommit, _complete);
-  return queue_transactions(ch, tls, _onreadable, _oncommit,
-			    onreadable_sync, op);
 }

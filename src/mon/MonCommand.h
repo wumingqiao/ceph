@@ -30,6 +30,7 @@ struct MonCommand {
   static const uint64_t FLAG_OBSOLETE   = 1 << 1;
   static const uint64_t FLAG_DEPRECATED = 1 << 2;
   static const uint64_t FLAG_MGR        = 1 << 3;
+  static const uint64_t FLAG_POLL       = 1 << 4;
 
   bool has_flag(uint64_t flag) const { return (flags & flag) != 0; }
   void set_flag(uint64_t flag) { flags |= flag; }
@@ -42,7 +43,7 @@ struct MonCommand {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator &bl) {
+  void decode(bufferlist::const_iterator &bl) {
     DECODE_START(1, bl);
     decode_bare(bl);
     decode(flags, bl);
@@ -60,7 +61,7 @@ struct MonCommand {
     encode(req_perms, bl);
     encode(availability, bl);
   }
-  void decode_bare(bufferlist::iterator &bl) {
+  void decode_bare(bufferlist::const_iterator &bl) {
     using ceph::decode;
     decode(cmdstring, bl);
     decode(helpstring, bl);
@@ -103,7 +104,7 @@ struct MonCommand {
     ENCODE_FINISH(bl);
   }
   static void decode_array(MonCommand **cmds, int *size,
-                           bufferlist::iterator &bl) {
+                           bufferlist::const_iterator &bl) {
     DECODE_START(2, bl);
     uint16_t s = 0;
     decode(s, bl);
@@ -137,7 +138,7 @@ struct MonCommand {
     ENCODE_FINISH(bl);
   }
   static void decode_vector(std::vector<MonCommand> &cmds,
-			    bufferlist::iterator &bl) {
+			    bufferlist::const_iterator &bl) {
     DECODE_START(2, bl);
     uint16_t s = 0;
     decode(s, bl);

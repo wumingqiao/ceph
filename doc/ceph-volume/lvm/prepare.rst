@@ -42,6 +42,10 @@ The API call looks like::
 
     ceph-volume lvm prepare --filestore --data volume_group/lv_name --journal journal
 
+For enabling :ref:`encryption <ceph-volume-lvm-encryption>`, the ``--dmcrypt`` flag is required::
+
+    ceph-volume lvm prepare --filestore --dmcrypt --data volume_group/lv_name --journal journal
+
 There is flexibility to use a raw device or partition as well for ``--data``
 that will be converted to a logical volume. This is not ideal in all situations
 since ``ceph-volume`` is just going to create a unique volume group and
@@ -158,9 +162,8 @@ any data** in the OSD)::
 
 The command line tool will not contact the monitor to generate an OSD ID and
 will format the LVM device in addition to storing the metadata on it so that it
-can later be startednot contact the monitor to generate an OSD ID and will
-format the LVM device in addition to storing the metadata on it so that it can
-later be started (for detailed metadata description see :ref:`ceph-volume-lvm-tags`).
+can be started later (for detailed metadata description see
+:ref:`ceph-volume-lvm-tags`).
 
 
 .. _ceph-volume-lvm-prepare_bluestore:
@@ -189,6 +192,9 @@ A raw device can be specified in the same way::
 
     ceph-volume lvm prepare --bluestore --data /path/to/device
 
+For enabling :ref:`encryption <ceph-volume-lvm-encryption>`, the ``--dmcrypt`` flag is required::
+
+    ceph-volume lvm prepare --bluestore --dmcrypt --data vg/lv
 
 If a ``block.db`` or a ``block.wal`` is needed (they are optional for
 bluestore) they can be specified with ``--block.db`` and ``--block.wal``
@@ -233,6 +239,33 @@ To set the crush device class for the OSD, use the ``--crush-device-class`` flag
 work for both bluestore and filestore OSDs::
 
     ceph-volume lvm prepare --bluestore --data vg/lv --crush-device-class foo
+
+
+.. _ceph-volume-lvm-multipath:
+
+``multipath`` support
+---------------------
+Devices that come from ``multipath`` are not supported as-is. The tool will
+refuse to consume a raw multipath device and will report a message like::
+
+    -->  RuntimeError: Cannot use device (/dev/mapper/<name>). A vg/lv path or an existing device is needed
+
+The reason for not supporting multipath is that depending on the type of the
+multipath setup, if using an active/passive array as the underlying physical
+devices, filters are required in ``lvm.conf`` to exclude the disks that are part of
+those underlying devices.
+
+It is unfeasible for ceph-volume to understand what type of configuration is
+needed for LVM to be able to work in various different multipath scenarios. The
+functionality to create the LV for you is merely a (naive) convenience,
+anything that involves different settings or configuration must be provided by
+a config management system which can then provide VGs and LVs for ceph-volume
+to consume.
+
+This situation will only arise when trying to use the ceph-volume functionality
+that creates a volume group and logical volume from a device. If a multipath
+device is already a logical volume it *should* work, given that the LVM
+configuration is done correctly to avoid issues.
 
 
 Storing metadata

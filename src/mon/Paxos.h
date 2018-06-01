@@ -1149,7 +1149,7 @@ public:
   static void decode_append_transaction(MonitorDBStore::TransactionRef t,
 					bufferlist& bl) {
     auto vt(std::make_shared<MonitorDBStore::Transaction>());
-    bufferlist::iterator it = bl.begin();
+    auto it = bl.cbegin();
     vt->decode(it);
     t->append(vt);
   }
@@ -1231,14 +1231,6 @@ public:
    * @return the first committed version
    */
   version_t get_first_committed() { return first_committed; }
-  /** 
-   * Get the last commit time
-   *
-   * @returns Our last commit time
-  */
-  utime_t get_last_commit_time() const{
-    return last_commit_time;
-  }
   /**
    * Check if a given version is readable.
    *
@@ -1368,7 +1360,7 @@ inline ostream& operator<<(ostream& out, Paxos::C_Proposal& p)
       << " queued " << (ceph_clock_now() - p.proposal_time)
       << " tx dump:\n";
   auto t(std::make_shared<MonitorDBStore::Transaction>());
-  bufferlist::iterator p_it = p.bl.begin();
+  auto p_it = p.bl.cbegin();
   t->decode(p_it);
   JSONFormatter f(true);
   t->dump(&f);

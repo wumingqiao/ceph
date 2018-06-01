@@ -92,7 +92,7 @@ private:
       encode(hash_level, bl);
     }
 
-    void decode(bufferlist::iterator &bl)
+    void decode(bufferlist::const_iterator &bl)
     {
       using ceph::decode;
       __u8 v;
@@ -114,7 +114,7 @@ private:
       encode(v, bl);
       encode(split_rand_factor, bl);
     }
-    void decode(bufferlist::iterator &bl)
+    void decode(bufferlist::const_iterator &bl)
     {
       using ceph::decode;
       __u8 v;
@@ -134,7 +134,7 @@ private:
     InProgressOp(int op, const vector<string> &path)
       : op(op), path(path) {}
 
-    explicit InProgressOp(bufferlist::iterator &bl) {
+    explicit InProgressOp(bufferlist::const_iterator &bl) {
       decode(bl);
     }
 
@@ -150,7 +150,7 @@ private:
       encode(path, bl);
     }
 
-    void decode(bufferlist::iterator &bl) {
+    void decode(bufferlist::const_iterator &bl) {
       using ceph::decode;
       __u8 v;
       decode(v, bl);
@@ -395,7 +395,7 @@ private:
 
   struct CmpPairBitwise {
     bool operator()(const pair<string, ghobject_t>& l,
-		    const pair<string, ghobject_t>& r)
+		    const pair<string, ghobject_t>& r) const
     {
       if (l.first < r.first)
 	return true;
@@ -408,7 +408,7 @@ private:
   };
 
   struct CmpHexdigitStringBitwise {
-    bool operator()(const string& l, const string& r) {
+    bool operator()(const string& l, const string& r) const {
       return reverse_hexdigit_bits_string(l) < reverse_hexdigit_bits_string(r);
     }
   };

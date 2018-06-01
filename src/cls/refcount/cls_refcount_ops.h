@@ -5,8 +5,7 @@
 #define CEPH_CLS_REFCOUNT_OPS_H
 
 #include "include/types.h"
-
-class Formatter;
+#include "common/hobject.h"
 
 struct cls_refcount_get_op {
   string tag;
@@ -21,7 +20,7 @@ struct cls_refcount_get_op {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(tag, bl);
     decode(implicit_ref, bl);
@@ -46,7 +45,7 @@ struct cls_refcount_put_op {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(tag, bl);
     decode(implicit_ref, bl);
@@ -69,7 +68,7 @@ struct cls_refcount_set_op {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(refs, bl);
     DECODE_FINISH(bl);
@@ -92,7 +91,7 @@ struct cls_refcount_read_op {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(implicit_ref, bl);
     DECODE_FINISH(bl);
@@ -114,7 +113,7 @@ struct cls_refcount_read_ret {
     ENCODE_FINISH(bl);
   }
 
-  void decode(bufferlist::iterator& bl) {
+  void decode(bufferlist::const_iterator& bl) {
     DECODE_START(1, bl);
     decode(refs, bl);
     DECODE_FINISH(bl);
@@ -125,5 +124,90 @@ struct cls_refcount_read_ret {
 };
 WRITE_CLASS_ENCODER(cls_refcount_read_ret)
 
+struct cls_chunk_refcount_get_op {
+  hobject_t source;
 
+  cls_chunk_refcount_get_op() {}
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(source, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(source, bl);
+    DECODE_FINISH(bl);
+  }
+  void dump(ceph::Formatter *f) const;
+  static void generate_test_instances(list<cls_chunk_refcount_get_op*>& ls);
+};
+WRITE_CLASS_ENCODER(cls_chunk_refcount_get_op)
+
+struct cls_chunk_refcount_put_op {
+  hobject_t source;
+
+  cls_chunk_refcount_put_op() {}
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(source, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(source, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(ceph::Formatter *f) const;
+  static void generate_test_instances(list<cls_chunk_refcount_put_op*>& ls);
+};
+WRITE_CLASS_ENCODER(cls_chunk_refcount_put_op)
+
+struct cls_chunk_refcount_set_op {
+  set<hobject_t> refs;
+
+  cls_chunk_refcount_set_op() {}
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(refs, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(refs, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(ceph::Formatter *f) const;
+  static void generate_test_instances(list<cls_chunk_refcount_set_op*>& ls);
+};
+WRITE_CLASS_ENCODER(cls_chunk_refcount_set_op)
+
+struct cls_chunk_refcount_read_ret {
+  set<hobject_t> refs;
+
+  cls_chunk_refcount_read_ret() {}
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(refs, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(refs, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(ceph::Formatter *f) const;
+  static void generate_test_instances(list<cls_chunk_refcount_read_ret*>& ls);
+};
+WRITE_CLASS_ENCODER(cls_chunk_refcount_read_ret)
 #endif

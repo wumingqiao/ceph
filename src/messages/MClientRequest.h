@@ -70,7 +70,7 @@ public:
       encode(item, bl);
       encode_nohead(dname, bl);
     }
-    void decode(bufferlist::iterator& bl) {
+    void decode(bufferlist::const_iterator& bl) {
       using ceph::decode;
       decode(item, bl);
       decode_nohead(item.dname_len, dname, bl);
@@ -175,7 +175,7 @@ public:
   bool is_queued_for_replay() { return queued_for_replay; }
 
   void decode_payload() override {
-    bufferlist::iterator p = payload.begin();
+    auto p = payload.cbegin();
 
     if (header.version >= 4) {
       decode(head, p);
@@ -250,7 +250,7 @@ public:
     }
     if (head.op == CEPH_MDS_OP_SETFILELOCK ||
 	head.op == CEPH_MDS_OP_GETFILELOCK) {
-      out << "rule " << (int)head.args.filelock_change.rule
+      out << " rule " << (int)head.args.filelock_change.rule
 	  << ", type " << (int)head.args.filelock_change.type
 	  << ", owner " << head.args.filelock_change.owner
 	  << ", pid " << head.args.filelock_change.pid

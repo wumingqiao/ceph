@@ -98,11 +98,11 @@ public:
 
   /* Full serialization for use in ".inode" root inode objects */
   void encode(bufferlist &bl, uint64_t features, const bufferlist *snap_blob=NULL) const;
-  void decode(bufferlist::iterator &bl, bufferlist& snap_blob);
+  void decode(bufferlist::const_iterator &bl, bufferlist& snap_blob);
 
   /* Serialization without ENCODE_START/FINISH blocks for use embedded in dentry */
   void encode_bare(bufferlist &bl, uint64_t features, const bufferlist *snap_blob=NULL) const;
-  void decode_bare(bufferlist::iterator &bl, bufferlist &snap_blob, __u8 struct_v=5);
+  void decode_bare(bufferlist::const_iterator &bl, bufferlist &snap_blob, __u8 struct_v=5);
 
   /* For test/debug output */
   void dump(Formatter *f) const;
@@ -120,13 +120,13 @@ public:
   void encode(bufferlist &bl, uint64_t features) const {
     InodeStoreBase::encode(bl, features, &snap_blob);
   }
-  void decode(bufferlist::iterator &bl) {
+  void decode(bufferlist::const_iterator &bl) {
     InodeStoreBase::decode(bl, snap_blob);
   }
   void encode_bare(bufferlist &bl, uint64_t features) const {
     InodeStoreBase::encode_bare(bl, features, &snap_blob);
   }
-  void decode_bare(bufferlist::iterator &bl) {
+  void decode_bare(bufferlist::const_iterator &bl) {
     InodeStoreBase::decode_bare(bl, snap_blob);
   }
 
@@ -140,7 +140,7 @@ public:
   void encode(bufferlist &bl, uint64_t features) const {
     InodeStore::encode_bare(bl, features);
   }
-  void decode(bufferlist::iterator &bl) {
+  void decode(bufferlist::const_iterator &bl) {
     InodeStore::decode_bare(bl);
   }
   static void generate_test_instances(std::list<InodeStoreBare*>& ls);
@@ -210,35 +210,38 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   static const int DUMP_STATE =            (1 << 3);
   static const int DUMP_CAPS =             (1 << 4);
   static const int DUMP_PATH =             (1 << 5);
+  static const int DUMP_DIRFRAGS =         (1 << 6);
   static const int DUMP_ALL =              (-1);
-  static const int DUMP_DEFAULT = DUMP_ALL & (~DUMP_PATH);
+  static const int DUMP_DEFAULT = DUMP_ALL & (~DUMP_PATH) & (~DUMP_DIRFRAGS);
 
   // -- state --
-  static const int STATE_EXPORTING =   (1<<2);   // on nonauth bystander.
-  static const int STATE_OPENINGDIR =  (1<<5);
-  static const int STATE_FREEZING =    (1<<7);
-  static const int STATE_FROZEN =      (1<<8);
-  static const int STATE_AMBIGUOUSAUTH = (1<<9);
-  static const int STATE_EXPORTINGCAPS = (1<<10);
-  static const int STATE_NEEDSRECOVER = (1<<11);
-  static const int STATE_RECOVERING =   (1<<12);
-  static const int STATE_PURGING =     (1<<13);
-  static const int STATE_DIRTYPARENT =  (1<<14);
-  static const int STATE_DIRTYRSTAT =  (1<<15);
-  static const int STATE_STRAYPINNED = (1<<16);
-  static const int STATE_FROZENAUTHPIN = (1<<17);
-  static const int STATE_DIRTYPOOL =   (1<<18);
-  static const int STATE_REPAIRSTATS = (1<<19);
-  static const int STATE_MISSINGOBJS = (1<<20);
-  static const int STATE_EVALSTALECAPS = (1<<21);
-  static const int STATE_QUEUEDEXPORTPIN = (1<<22);
+  static const int STATE_EXPORTING 		= (1<<0);   // on nonauth bystander.
+  static const int STATE_OPENINGDIR		= (1<<1);
+  static const int STATE_FREEZING		= (1<<2);
+  static const int STATE_FROZEN			= (1<<3);
+  static const int STATE_AMBIGUOUSAUTH		= (1<<4);
+  static const int STATE_EXPORTINGCAPS		= (1<<5);
+  static const int STATE_NEEDSRECOVER		= (1<<6);
+  static const int STATE_RECOVERING		= (1<<7);
+  static const int STATE_PURGING		= (1<<8);
+  static const int STATE_DIRTYPARENT		= (1<<9);
+  static const int STATE_DIRTYRSTAT		= (1<<10);
+  static const int STATE_STRAYPINNED		= (1<<11);
+  static const int STATE_FROZENAUTHPIN		= (1<<12);
+  static const int STATE_DIRTYPOOL		= (1<<13);
+  static const int STATE_REPAIRSTATS		= (1<<14);
+  static const int STATE_MISSINGOBJS		= (1<<15);
+  static const int STATE_EVALSTALECAPS		= (1<<16);
+  static const int STATE_QUEUEDEXPORTPIN	= (1<<17);
+  static const int STATE_TRACKEDBYOFT		= (1<<18);  // tracked by open file table
   // orphan inode needs notification of releasing reference
   static const int STATE_ORPHAN =	STATE_NOTIFYREF;
 
   static const int MASK_STATE_EXPORTED =
     (STATE_DIRTY|STATE_NEEDSRECOVER|STATE_DIRTYPARENT|STATE_DIRTYPOOL);
   static const int MASK_STATE_EXPORT_KEPT =
-    (STATE_FROZEN|STATE_AMBIGUOUSAUTH|STATE_EXPORTINGCAPS|STATE_QUEUEDEXPORTPIN);
+    (STATE_FROZEN|STATE_AMBIGUOUSAUTH|STATE_EXPORTINGCAPS|
+     STATE_QUEUEDEXPORTPIN|STATE_TRACKEDBYOFT);
 
   // -- waiters --
   static const uint64_t WAIT_DIR         = (1<<0);
@@ -417,12 +420,14 @@ public:
 
   class projected_inode {
   public:
+    static sr_t* const UNDEF_SRNODE;
+
     mempool_inode inode;
     std::unique_ptr<mempool_xattr_map> xattrs;
-    std::unique_ptr<sr_t> snapnode;
+    sr_t *snapnode = UNDEF_SRNODE;
 
     projected_inode() = delete;
-    projected_inode(const mempool_inode &in) : inode(in) {}
+    explicit projected_inode(const mempool_inode &in) : inode(in) {}
   };
 
 private:
@@ -430,7 +435,6 @@ private:
   size_t num_projected_xattrs = 0;
   size_t num_projected_srnodes = 0;
 
-  sr_t &project_snaprealm(projected_inode &pi);
 public:
   CInode::projected_inode &project_inode(bool xattr = false, bool snap = false);
   void pop_and_dirty_projected_inode(LogSegment *ls);
@@ -491,21 +495,37 @@ public:
     return &xattrs;
   }
 
+  sr_t *prepare_new_srnode(snapid_t snapid);
+  void project_snaprealm(sr_t *new_srnode);
+  sr_t *project_snaprealm(snapid_t snapid=0) {
+    sr_t* new_srnode = prepare_new_srnode(snapid);
+    project_snaprealm(new_srnode);
+    return new_srnode;
+  }
   const sr_t *get_projected_srnode() const {
     if (num_projected_srnodes > 0) {
       for (auto it = projected_nodes.rbegin(); it != projected_nodes.rend(); ++it)
-	if (it->snapnode)
-	  return it->snapnode.get();
+	if (it->snapnode != projected_inode::UNDEF_SRNODE)
+	  return it->snapnode;
     }
     if (snaprealm)
       return &snaprealm->srnode;
     else
       return NULL;
   }
-  void project_past_snaprealm_parent(SnapRealm *newparent);
+
+  void mark_snaprealm_global(sr_t *new_srnode);
+  void clear_snaprealm_global(sr_t *new_srnode);
+  bool is_projected_snaprealm_global() const;
+
+  void record_snaprealm_past_parent(sr_t *new_snap, SnapRealm *newparent);
+  void record_snaprealm_parent_dentry(sr_t *new_snap, SnapRealm *newparent,
+				      CDentry *dn, bool primary_dn);
+  void project_snaprealm_past_parent(SnapRealm *newparent);
+  void early_pop_projected_snaprealm();
 
 private:
-  void pop_projected_snaprealm(sr_t *next_snaprealm);
+  void pop_projected_snaprealm(sr_t *next_snaprealm, bool early);
 
 public:
   mempool_old_inode& cow_old_inode(snapid_t follows, bool cow_head);
@@ -533,7 +553,7 @@ public:
   }
   bool get_dirfrags_under(frag_t fg, std::list<CDir*>& ls);
   CDir* get_approx_dirfrag(frag_t fg);
-  void get_dirfrags(std::list<CDir*>& ls);
+  void get_dirfrags(std::list<CDir*>& ls) const;
   void get_nested_dirfrags(std::list<CDir*>& ls);
   void get_subtree_dirfrags(std::list<CDir*>& ls);
   CDir *get_or_open_dirfrag(MDCache *mdcache, frag_t fg);
@@ -564,7 +584,8 @@ protected:
   using cap_map = mempool::mds_co::map<client_t, Capability*>;
   cap_map client_caps;         // client -> caps
   mempool::mds_co::compact_map<int32_t, int32_t>      mds_caps_wanted;     // [auth] mds -> caps wanted
-  int                   replica_caps_wanted = 0; // [replica] what i've requested from auth
+  int replica_caps_wanted = 0; // [replica] what i've requested from auth
+  int num_caps_wanted = 0;
 
 public:
   mempool::mds_co::compact_map<int, mempool::mds_co::set<client_t> > client_snap_caps;     // [auth] [snap] dirty metadata we still need from the head
@@ -612,7 +633,7 @@ protected:
     if (has_flock_locks)
       encode(*flock_locks, bl);
   }
-  void _decode_file_locks(bufferlist::iterator& p) {
+  void _decode_file_locks(bufferlist::const_iterator& p) {
     using ceph::decode;
     bool has_fcntl_locks;
     decode(has_fcntl_locks, p);
@@ -647,6 +668,7 @@ public:
   int auth_pin_freeze_allowance = 0;
 
   inode_load_vec_t pop;
+  elist<CInode*>::item item_pop_lru;
 
   // friends
   friend class Server;
@@ -689,6 +711,7 @@ public:
     clear_file_locks();
     assert(num_projected_xattrs == 0);
     assert(num_projected_srnodes == 0);
+    assert(num_caps_wanted == 0);
   }
   
 
@@ -699,7 +722,7 @@ public:
     return (mds_rank_t)MDS_INO_STRAY_OWNER(inode.ino);
   }
   bool is_mdsdir() const { return MDS_INO_IS_MDSDIR(inode.ino); }
-  bool is_base() const { return is_root() || is_mdsdir(); }
+  bool is_base() const { return MDS_INO_IS_BASE(inode.ino); }
   bool is_system() const { return inode.ino < MDS_INO_SYSTEM_BASE; }
   bool is_normal() const { return !(is_base() || is_system() || is_stray()); }
 
@@ -784,7 +807,7 @@ protected:
    */
   int64_t get_backtrace_pool() const;
 public:
-  void _mark_dirty_parent(LogSegment *ls, bool dirty_pool=false);
+  void mark_dirty_parent(LogSegment *ls, bool dirty_pool=false);
   void clear_dirty_parent();
   void verify_diri_backtrace(bufferlist &bl, int err);
   bool is_dirty_parent() { return state_test(STATE_DIRTYPARENT); }
@@ -793,7 +816,7 @@ public:
   void encode_snap_blob(bufferlist &bl);
   void decode_snap_blob(bufferlist &bl);
   void encode_store(bufferlist& bl, uint64_t features);
-  void decode_store(bufferlist::iterator& bl);
+  void decode_store(bufferlist::const_iterator& bl);
 
   void encode_replica(mds_rank_t rep, bufferlist& bl, uint64_t features, bool need_recover) {
     assert(is_auth());
@@ -809,7 +832,7 @@ public:
     _encode_base(bl, features);
     _encode_locks_state_for_replica(bl, need_recover);
   }
-  void decode_replica(bufferlist::iterator& p, bool is_new) {
+  void decode_replica(bufferlist::const_iterator& p, bool is_new) {
     using ceph::decode;
     __u32 nonce;
     decode(nonce, p);
@@ -833,13 +856,13 @@ public:
 
   // -- encode/decode helpers --
   void _encode_base(bufferlist& bl, uint64_t features);
-  void _decode_base(bufferlist::iterator& p);
+  void _decode_base(bufferlist::const_iterator& p);
   void _encode_locks_full(bufferlist& bl);
-  void _decode_locks_full(bufferlist::iterator& p);
+  void _decode_locks_full(bufferlist::const_iterator& p);
   void _encode_locks_state_for_replica(bufferlist& bl, bool need_recover);
   void _encode_locks_state_for_rejoin(bufferlist& bl, int rep);
-  void _decode_locks_state(bufferlist::iterator& p, bool is_new);
-  void _decode_locks_rejoin(bufferlist::iterator& p, std::list<MDSInternalContextBase*>& waiters,
+  void _decode_locks_state(bufferlist::const_iterator& p, bool is_new);
+  void _decode_locks_rejoin(bufferlist::const_iterator& p, std::list<MDSInternalContextBase*>& waiters,
 			    std::list<SimpleLock*>& eval_locks, bool survivor);
 
   // -- import/export --
@@ -851,7 +874,7 @@ public:
     state_clear(STATE_EXPORTINGCAPS);
     put(PIN_EXPORTINGCAPS);
   }
-  void decode_import(bufferlist::iterator& p, LogSegment *ls);
+  void decode_import(bufferlist::const_iterator& p, LogSegment *ls);
   
 
   // for giving to clients
@@ -922,7 +945,7 @@ public:
   void close_snaprealm(bool no_join=false);
   SnapRealm *find_snaprealm() const;
   void encode_snap(bufferlist& bl);
-  void decode_snap(bufferlist::iterator& p);
+  void decode_snap(bufferlist::const_iterator& p);
 
   // -- caps -- (new)
   // client caps
@@ -973,7 +996,8 @@ public:
   bool is_any_nonstale_caps() { return count_nonstale_caps(); }
 
   const mempool::mds_co::compact_map<int32_t,int32_t>& get_mds_caps_wanted() const { return mds_caps_wanted; }
-  mempool::mds_co::compact_map<int32_t,int32_t>& get_mds_caps_wanted() { return mds_caps_wanted; }
+  void set_mds_caps_wanted(mempool::mds_co::compact_map<int32_t,int32_t>& m);
+  void set_mds_caps_wanted(mds_rank_t mds, int32_t wanted);
 
   const cap_map& get_client_caps() const { return client_caps; }
   Capability *get_client_cap(client_t client) {
@@ -990,6 +1014,9 @@ public:
       return 0;
     }
   }
+
+  int get_num_caps_wanted() const { return num_caps_wanted; }
+  void adjust_num_caps_wanted(int d);
 
   Capability *add_client_cap(client_t client, Session *session, SnapRealm *conrealm=0);
   void remove_client_cap(client_t client);
@@ -1071,7 +1098,8 @@ public:
   // -- hierarchy stuff --
 public:
   void set_primary_parent(CDentry *p) {
-    assert(parent == 0);
+    assert(parent == 0 ||
+	   g_conf->get_val<bool>("mds_hack_allow_loading_invalid_metadata"));
     parent = p;
   }
   void remove_primary_parent(CDentry *dn) {

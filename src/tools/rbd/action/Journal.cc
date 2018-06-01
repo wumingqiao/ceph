@@ -78,7 +78,7 @@ static int do_show_journal_info(librados::Rados& rados, librados::IoCtx& io_ctx,
     std::cout << "\theader_oid: " << header_oid << std::endl;
     std::cout << "\tobject_oid_prefix: " << object_oid_prefix << std::endl;
     std::cout << "\torder: " << static_cast<int>(order) << " ("
-	      << prettybyte_t(1ull << order) << " objects)"<< std::endl;
+	      << byte_u_t(1ull << order) << " objects)"<< std::endl;
     std::cout << "\tsplay_width: " << static_cast<int>(splay_width) << std::endl;
     if (!object_pool_name.empty()) {
       std::cout << "\tobject_pool: " << object_pool_name << std::endl;
@@ -363,7 +363,7 @@ static int inspect_entry(bufferlist& data,
 			 librbd::journal::EventEntry& event_entry,
 			 bool verbose) {
   try {
-    bufferlist::iterator it = data.begin();
+    auto it = data.cbegin();
     decode(event_entry, it);
   } catch (const buffer::error &err) {
     std::cerr << "failed to decode event entry: " << err.what() << std::endl;
@@ -674,7 +674,7 @@ public:
       return false;
     }
     if (r != entry_size) {
-      std::cerr << "rbd: error reading from stdin: trucated"
+      std::cerr << "rbd: error reading from stdin: truncated"
 		<< std::endl;
       r = -EINVAL;
       return false;

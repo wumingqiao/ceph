@@ -1388,27 +1388,6 @@ TEST_F(PGLogTest, merge_log) {
     EXPECT_TRUE(dirty_big_info);
   }
 
-  // If our log is empty, the incoming log needs to have not been trimmed.
-  {
-    clear();
-
-    pg_log_t olog;
-    pg_info_t oinfo;
-    pg_shard_t fromosd;
-    pg_info_t info;
-    list<hobject_t> remove_snap;
-    bool dirty_info = false;
-    bool dirty_big_info = false;
-
-    // olog has been trimmed
-    olog.tail = eversion_t(1, 1);
-
-    TestHandler h(remove_snap);
-    PrCtl unset_dumpable;
-    ASSERT_DEATH(merge_log(oinfo, olog, fromosd, info, &h,
-			   dirty_info, dirty_big_info), "");
-  }
-
 }
 
 TEST_F(PGLogTest, proc_replica_log) {
@@ -2294,7 +2273,7 @@ TEST_F(PGLogTest, split_into_preserves_may_include_deletes) {
   {
     rebuilt_missing_with_deletes = false;
     missing.may_include_deletes = true;
-    PGLog child_log(cct, prefix_provider);
+    PGLog child_log(cct);
     pg_t child_pg;
     split_into(child_pg, 6, &child_log);
     ASSERT_TRUE(child_log.get_missing().may_include_deletes);
@@ -2304,7 +2283,7 @@ TEST_F(PGLogTest, split_into_preserves_may_include_deletes) {
   {
     rebuilt_missing_with_deletes = false;
     missing.may_include_deletes = false;
-    PGLog child_log(cct, prefix_provider);
+    PGLog child_log(cct);
     pg_t child_pg;
     split_into(child_pg, 6, &child_log);
     ASSERT_FALSE(child_log.get_missing().may_include_deletes);
@@ -2321,7 +2300,7 @@ public:
     test_coll = coll_t(spg_t(pg_t(1, 1)));
     ch = store->create_new_collection(test_coll);
     t.create_collection(test_coll, 0);
-    store->apply_transaction(ch, std::move(t));
+    store->queue_transaction(ch, std::move(t));
     existing_oid = mk_obj(0);
     nonexistent_oid = mk_obj(1);
     ghobject_t existing_ghobj(existing_oid);
@@ -2332,7 +2311,7 @@ public:
     ObjectStore::Transaction t2;
     t2.touch(test_coll, ghobject_t(existing_oid));
     t2.setattr(test_coll, ghobject_t(existing_oid), OI_ATTR, enc_oi);
-    ASSERT_EQ(0u, store->apply_transaction(ch, std::move(t2)));
+    ASSERT_EQ(0u, store->queue_transaction(ch, std::move(t2)));
     info.last_backfill = hobject_t::get_max();
     info.last_complete = eversion_t();
   }
@@ -2404,7 +2383,7 @@ public:
     test_coll = coll_t(spg_t(pg_t(1, 1)));
     auto ch = store->create_new_collection(test_coll);
     t.create_collection(test_coll, 0);
-    store->apply_transaction(ch, std::move(t));
+    store->queue_transaction(ch, std::move(t));
   }
 
   void TearDown() override {
@@ -2490,7 +2469,7 @@ public:
       t.omap_setkeys(test_coll, log_oid, km);
     }
     auto ch = store->open_collection(test_coll);
-    ASSERT_EQ(0u, store->apply_transaction(ch, std::move(t)));
+    ASSERT_EQ(0u, store->queue_transaction(ch, std::move(t)));
 
     auto orig_dups = log.dups;
     clear();

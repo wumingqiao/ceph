@@ -52,13 +52,33 @@ class Module(MgrModule):
     config = dict()
     ceph_health_mapping = {'HEALTH_OK': 0, 'HEALTH_WARN': 1, 'HEALTH_ERR': 2}
 
-    config_keys = {
-        'zabbix_sender': '/usr/bin/zabbix_sender',
-        'zabbix_host': None,
-        'zabbix_port': 10051,
-        'identifier': "",
-        'interval': 60
-    }
+    @property
+    def config_keys(self):
+        return dict((o['name'], o.get('default', None))
+                for o in self.OPTIONS)
+
+    OPTIONS = [
+            {
+                'name': 'zabbix_sender',
+                'default': '/usr/bin/zabbix_sender'
+            },
+            {
+                'name': 'zabbix_host',
+                'default': None
+            },
+            {
+                'name': 'zabbix_port',
+                'default': 10051
+            },
+            {
+                'name': 'identifier',
+                'default': ""
+            },
+            {
+                'name': 'interval',
+                'default': 60
+            }
+    ]
 
     COMMANDS = [
         {
@@ -172,6 +192,7 @@ class Module(MgrModule):
         data['num_osd_in'] = num_in
 
         osd_fill = list()
+        osd_pgs = list()
         osd_apply_latency_ns = list()
         osd_commit_latency_ns = list()
 
@@ -180,6 +201,7 @@ class Module(MgrModule):
             if osd['kb'] == 0:
                 continue
             osd_fill.append((float(osd['kb_used']) / float(osd['kb'])) * 100)
+            osd_pgs.append(osd['num_pgs'])
             osd_apply_latency_ns.append(osd['perf_stat']['apply_latency_ns'])
             osd_commit_latency_ns.append(osd['perf_stat']['commit_latency_ns'])
 
@@ -187,6 +209,9 @@ class Module(MgrModule):
             data['osd_max_fill'] = max(osd_fill)
             data['osd_min_fill'] = min(osd_fill)
             data['osd_avg_fill'] = avg(osd_fill)
+            data['osd_max_pgs'] = max(osd_pgs)
+            data['osd_min_pgs'] = min(osd_pgs)
+            data['osd_avg_pgs'] = avg(osd_pgs)
         except ValueError:
             pass
 
@@ -223,7 +248,7 @@ class Module(MgrModule):
             self.set_health_checks({
                 'MGR_ZABBIX_NO_SERVER': {
                     'severity': 'warning',
-                    'summary': 'No Zabbix server not configured',
+                    'summary': 'No Zabbix server configured',
                     'detail': ['Configuration value zabbix_host not configured']
                 }
             })

@@ -53,6 +53,7 @@ static const std::string DEST_IMAGE_NAME("dest");
 static const std::string GROUP_NAME("group");
 static const std::string DEST_GROUP_NAME("dest-group");
 static const std::string SNAPSHOT_NAME("snap");
+static const std::string SNAPSHOT_ID("snap-id");
 static const std::string DEST_SNAPSHOT_NAME("dest-snap");
 static const std::string JOURNAL_NAME("journal");
 static const std::string DEST_JOURNAL_NAME("dest-journal");
@@ -71,6 +72,8 @@ static const std::string IMAGE_STRIPE_UNIT("stripe-unit");
 static const std::string IMAGE_STRIPE_COUNT("stripe-count");
 static const std::string IMAGE_DATA_POOL("data-pool");
 static const std::string IMAGE_SPARSE_SIZE("sparse-size");
+static const std::string IMAGE_THICK_PROVISION("thick-provision");
+static const std::string IMAGE_FLATTEN("flatten");
 
 static const std::string JOURNAL_OBJECT_SIZE("journal-object-size");
 static const std::string JOURNAL_SPLAY_WIDTH("journal-splay-width");
@@ -126,7 +129,7 @@ std::string get_description_prefix(ArgumentModifier modifier);
 
 
 void add_special_pool_option(boost::program_options::options_description *opt,
-			     std::string prefix);
+			     const std::string &prefix);
 
 void add_all_option(boost::program_options::options_description *opt,
 		    std::string description);
@@ -148,6 +151,7 @@ void add_group_option(boost::program_options::options_description *opt,
 
 void add_snap_option(boost::program_options::options_description *opt,
                      ArgumentModifier modifier);
+void add_snap_id_option(boost::program_options::options_description *opt);
 
 void add_journal_option(boost::program_options::options_description *opt,
                       ArgumentModifier modifier,
@@ -201,6 +205,8 @@ void add_format_options(boost::program_options::options_description *opt);
 void add_verbose_option(boost::program_options::options_description *opt);
 
 void add_no_error_option(boost::program_options::options_description *opt);
+
+void add_flatten_option(boost::program_options::options_description *opt);
 
 std::string get_short_features_help(bool append_suffix);
 std::string get_long_features_help();

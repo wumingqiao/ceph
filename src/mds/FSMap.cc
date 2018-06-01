@@ -32,6 +32,8 @@ void Filesystem::dump(Formatter *f) const
 void FSMap::dump(Formatter *f) const
 {
   f->dump_int("epoch", epoch);
+  // Use 'default' naming to match 'set-default' CLI
+  f->dump_int("default_fscid", legacy_client_fscid);
 
   f->open_object_section("compat");
   compat.dump(f);
@@ -91,7 +93,6 @@ void FSMap::print(ostream& out) const
 
   if (filesystems.empty()) {
     out << "No filesystems configured" << std::endl;
-    return;
   }
 
   for (const auto &fs : filesystems) {
@@ -225,11 +226,11 @@ void FSMap::print_summary(Formatter *f, ostream *out) const
 }
 
 
-void FSMap::create_filesystem(std::string_view name,
-                              int64_t metadata_pool, int64_t data_pool,
-                              uint64_t features)
+std::shared_ptr<Filesystem> FSMap::create_filesystem(std::string_view name,
+    int64_t metadata_pool, int64_t data_pool, uint64_t features)
 {
   auto fs = std::make_shared<Filesystem>();
+  fs->mds_map.epoch = epoch;
   fs->mds_map.fs_name = name;
   fs->mds_map.data_pools.push_back(data_pool);
   fs->mds_map.metadata_pool = metadata_pool;
@@ -256,6 +257,8 @@ void FSMap::create_filesystem(std::string_view name,
   if (filesystems.size() == 1) {
     legacy_client_fscid = fs->fscid;
   }
+
+  return fs;
 }
 
 void FSMap::reset_filesystem(fs_cluster_id_t fscid)
@@ -421,7 +424,7 @@ void FSMap::encode(bufferlist& bl, uint64_t features) const
   }
 }
 
-void FSMap::decode(bufferlist::iterator& p)
+void FSMap::decode(bufferlist::const_iterator& p)
 {
   // The highest MDSMap encoding version before we changed the
   // MDSMonitor to store an FSMap instead of an MDSMap was
@@ -467,7 +470,7 @@ void FSMap::decode(bufferlist::iterator& p)
     if (ev >= 3)
       decode(legacy_mds_map.compat, p);
     else
-      legacy_mds_map.compat = get_mdsmap_compat_set_base();
+      legacy_mds_map.compat = MDSMap::get_compat_set_base();
     if (ev < 5) {
       __u32 n;
       decode(n, p);
@@ -496,19 +499,13 @@ void FSMap::decode(bufferlist::iterator& p)
 	decode(flag, p);
 	legacy_mds_map.explicitly_allowed_features = flag ?
 	  CEPH_MDSMAP_ALLOW_SNAPS : 0;
-	if (legacy_mds_map.max_mds > 1) {
-	  legacy_mds_map.set_multimds_allowed();
-	}
       } else {
 	decode(legacy_mds_map.ever_allowed_features, p);
 	decode(legacy_mds_map.explicitly_allowed_features, p);
       }
     } else {
-      legacy_mds_map.ever_allowed_features = CEPH_MDSMAP_ALLOW_CLASSICS;
+      legacy_mds_map.ever_allowed_features = 0;
       legacy_mds_map.explicitly_allowed_features = 0;
-      if (legacy_mds_map.max_mds > 1) {
-	legacy_mds_map.set_multimds_allowed();
-      }
     }
     if (ev >= 7)
       decode(legacy_mds_map.inline_data_enabled, p);
@@ -630,13 +627,13 @@ void Filesystem::encode(bufferlist& bl, uint64_t features) const
   ENCODE_FINISH(bl);
 }
 
-void Filesystem::decode(bufferlist::iterator& p)
+void Filesystem::decode(bufferlist::const_iterator& p)
 {
   DECODE_START(1, p);
   decode(fscid, p);
   bufferlist mdsmap_bl;
   decode(mdsmap_bl, p);
-  bufferlist::iterator mdsmap_bl_iter = mdsmap_bl.begin();
+  auto mdsmap_bl_iter = mdsmap_bl.cbegin();
   mds_map.decode(mdsmap_bl_iter);
   DECODE_FINISH(p);
 }

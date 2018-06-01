@@ -187,7 +187,7 @@ Replay<I>::~Replay() {
 }
 
 template <typename I>
-int Replay<I>::decode(bufferlist::iterator *it, EventEntry *event_entry) {
+int Replay<I>::decode(bufferlist::const_iterator *it, EventEntry *event_entry) {
   try {
     using ceph::decode;
     decode(*event_entry, *it);
@@ -271,7 +271,8 @@ void Replay<I>::shut_down(bool cancel_ops, Context *on_finish) {
   // execute the following outside of lock scope
   if (flush_comp != nullptr) {
     RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
-    io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+    io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp,
+                                   io::FLUSH_SOURCE_INTERNAL, {});
   }
   if (on_finish != nullptr) {
     on_finish->complete(0);
@@ -291,7 +292,8 @@ void Replay<I>::flush(Context *on_finish) {
   }
 
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
-  io::ImageRequest<I>::aio_flush(&m_image_ctx, aio_comp, {});
+  io::ImageRequest<I>::aio_flush(&m_image_ctx, aio_comp,
+                                 io::FLUSH_SOURCE_INTERNAL, {});
 }
 
 template <typename I>
@@ -348,16 +350,20 @@ void Replay<I>::handle_event(const journal::AioDiscardEvent &event,
     return;
   }
 
-  io::ImageRequest<I>::aio_discard(&m_image_ctx, aio_comp, event.offset,
-                                   event.length, event.skip_partial_discard,
-				   {});
+  if (!clipped_io(event.offset, aio_comp)) {
+    io::ImageRequest<I>::aio_discard(&m_image_ctx, aio_comp,
+                                     {{event.offset, event.length}},
+                                     event.skip_partial_discard, {});
+  }
+
   if (flush_required) {
     m_lock.Lock();
     auto flush_comp = create_aio_flush_completion(nullptr);
     m_lock.Unlock();
 
     if (flush_comp != nullptr) {
-      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp,
+                                     io::FLUSH_SOURCE_INTERNAL, {});
     }
   }
 }
@@ -378,16 +384,20 @@ void Replay<I>::handle_event(const journal::AioWriteEvent &event,
     return;
   }
 
-  io::ImageRequest<I>::aio_write(&m_image_ctx, aio_comp,
-                                 {{event.offset, event.length}},
-                                 std::move(data), 0, {});
+  if (!clipped_io(event.offset, aio_comp)) {
+    io::ImageRequest<I>::aio_write(&m_image_ctx, aio_comp,
+                                   {{event.offset, event.length}},
+                                   std::move(data), 0, {});
+  }
+
   if (flush_required) {
     m_lock.Lock();
     auto flush_comp = create_aio_flush_completion(nullptr);
     m_lock.Unlock();
 
     if (flush_comp != nullptr) {
-      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp,
+                                     io::FLUSH_SOURCE_INTERNAL, {});
     }
   }
 }
@@ -405,7 +415,8 @@ void Replay<I>::handle_event(const journal::AioFlushEvent &event,
   }
 
   if (aio_comp != nullptr) {
-    io::ImageRequest<I>::aio_flush(&m_image_ctx, aio_comp, {});
+    io::ImageRequest<I>::aio_flush(&m_image_ctx, aio_comp,
+                                   io::FLUSH_SOURCE_INTERNAL, {});
   }
   on_ready->complete(0);
 }
@@ -426,15 +437,20 @@ void Replay<I>::handle_event(const journal::AioWriteSameEvent &event,
     return;
   }
 
-  io::ImageRequest<I>::aio_writesame(&m_image_ctx, aio_comp, event.offset,
-                                     event.length, std::move(data), 0, {});
+  if (!clipped_io(event.offset, aio_comp)) {
+    io::ImageRequest<I>::aio_writesame(&m_image_ctx, aio_comp,
+                                       {{event.offset, event.length}},
+                                       std::move(data), 0, {});
+  }
+
   if (flush_required) {
     m_lock.Lock();
     auto flush_comp = create_aio_flush_completion(nullptr);
     m_lock.Unlock();
 
     if (flush_comp != nullptr) {
-      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp,
+                                     io::FLUSH_SOURCE_INTERNAL, {});
     }
   }
 }
@@ -452,17 +468,22 @@ void Replay<I>::handle_event(const journal::AioWriteSameEvent &event,
                                                io::AIO_TYPE_COMPARE_AND_WRITE,
                                                &flush_required,
                                                {-EILSEQ});
-  io::ImageRequest<I>::aio_compare_and_write(&m_image_ctx, aio_comp,
-                                             {{event.offset, event.length}},
-                                             std::move(cmp_data),
-                                             std::move(write_data),
-                                             nullptr, 0, {});
+
+  if (!clipped_io(event.offset, aio_comp)) {
+    io::ImageRequest<I>::aio_compare_and_write(&m_image_ctx, aio_comp,
+                                               {{event.offset, event.length}},
+                                               std::move(cmp_data),
+                                               std::move(write_data),
+                                               nullptr, 0, {});
+  }
+
   if (flush_required) {
     m_lock.Lock();
     auto flush_comp = create_aio_flush_completion(nullptr);
     m_lock.Unlock();
 
-    io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+    io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp,
+                                   io::FLUSH_SOURCE_INTERNAL, {});
   }
 }
 
@@ -876,7 +897,7 @@ void Replay<I>::handle_aio_modify_complete(Context *on_ready, Context *on_safe,
 
   if (r < 0) {
     lderr(cct) << ": AIO modify op failed: " << cpp_strerror(r) << dendl;
-    on_safe->complete(r);
+    m_image_ctx.op_work_queue->queue(on_safe, r);
     return;
   }
 
@@ -1116,6 +1137,29 @@ io::AioCompletion *Replay<I>::create_aio_flush_completion(Context *on_safe) {
       util::get_image_ctx(&m_image_ctx), io::AIO_TYPE_FLUSH);
   m_aio_modify_unsafe_contexts.clear();
   return aio_comp;
+}
+
+template <typename I>
+bool Replay<I>::clipped_io(uint64_t image_offset, io::AioCompletion *aio_comp) {
+  CephContext *cct = m_image_ctx.cct;
+
+  m_image_ctx.snap_lock.get_read();
+  size_t image_size = m_image_ctx.size;
+  m_image_ctx.snap_lock.put_read();
+
+  if (image_offset >= image_size) {
+    // rbd-mirror image sync might race an IO event w/ associated resize between
+    // the point the peer is registered and the sync point is created, so no-op
+    // IO events beyond the current image extents since under normal conditions
+    // it wouldn't have been recorded in the journal
+    ldout(cct, 5) << ": no-op IO event beyond image size" << dendl;
+    aio_comp->get();
+    aio_comp->unblock();
+    aio_comp->put();
+    return true;
+  }
+
+  return false;
 }
 
 } // namespace journal

@@ -48,21 +48,15 @@
 
 #include "include/uuid.h"
 
-
-// from include/linux/falloc.h:
-#ifndef FALLOC_FL_PUNCH_HOLE
-# define FALLOC_FL_PUNCH_HOLE 0x2
-#endif
-
 #if defined(__linux__)
 # ifndef BTRFS_SUPER_MAGIC
-#define BTRFS_SUPER_MAGIC 0x9123683EL
+#define BTRFS_SUPER_MAGIC 0x9123683EUL
 # endif
 # ifndef XFS_SUPER_MAGIC
-#define XFS_SUPER_MAGIC 0x58465342L
+#define XFS_SUPER_MAGIC 0x58465342UL
 # endif
 # ifndef ZFS_SUPER_MAGIC
-#define ZFS_SUPER_MAGIC 0x2fc12fc1L
+#define ZFS_SUPER_MAGIC 0x2fc12fc1UL
 # endif
 #endif
 
@@ -105,7 +99,7 @@ public:
   FSSuperblock() { }
 
   void encode(bufferlist &bl) const;
-  void decode(bufferlist::iterator &bl);
+  void decode(bufferlist::const_iterator &bl);
   void dump(Formatter *f) const;
   static void generate_test_instances(list<FSSuperblock*>& o);
 };
@@ -164,7 +158,10 @@ private:
 
   FileStoreBackend *backend;
 
-  void create_backend(long f_type);
+  void create_backend(unsigned long f_type);
+
+  int vdo_fd = -1;
+  string vdo_name;
 
   deque<uint64_t> snaps;
 
@@ -221,6 +218,7 @@ private:
     uint64_t ops, bytes;
     TrackedOpRef osd_op;
     ZTracer::Trace trace;
+    bool registered_apply = false;
   };
   class OpSequencer : public CollectionImpl {
     CephContext *cct;
@@ -230,6 +228,8 @@ private:
     list<pair<uint64_t, Context*> > flush_commit_waiters;
     Cond cond;
     string osr_name_str;
+    /// hash of pointers to ghobject_t's for in-flight writes
+    unordered_multimap<uint32_t,const ghobject_t*> applying;
   public:
     Mutex apply_lock;  // for apply mutual exclusion
     int id;
@@ -284,9 +284,10 @@ private:
       }
     }
 
-    void queue_journal(uint64_t s) {
+    void queue_journal(Op *o) {
       Mutex::Locker l(qlock);
-      jq.push_back(s);
+      jq.push_back(o->op);
+      _register_apply(o);
     }
     void dequeue_journal(list<Context*> *to_queue) {
       Mutex::Locker l(qlock);
@@ -297,8 +298,12 @@ private:
     void queue(Op *o) {
       Mutex::Locker l(qlock);
       q.push_back(o);
+      _register_apply(o);
       o->trace.keyval("queue depth", q.size());
     }
+    void _register_apply(Op *o);
+    void _unregister_apply(Op *o);
+    void wait_for_apply(const ghobject_t& oid);
     Op *peek_queue() {
       Mutex::Locker l(qlock);
       assert(apply_lock.is_locked());
@@ -312,7 +317,7 @@ private:
       Op *o = q.front();
       q.pop_front();
       cond.Signal();
-
+      _unregister_apply(o);
       _wake_flush_waiters(to_queue);
       return o;
     }
@@ -726,9 +731,7 @@ public:
   int omap_check_keys(CollectionHandle& c, const ghobject_t &oid, const set<string> &keys,
 		      set<string> *out) override;
   using ObjectStore::get_omap_iterator;
-  ObjectMap::ObjectMapIterator get_omap_iterator(CollectionHandle& c, const ghobject_t &oid) override {
-    return get_omap_iterator(c->cid, oid);
-  }
+  ObjectMap::ObjectMapIterator get_omap_iterator(CollectionHandle& c, const ghobject_t &oid) override;
   ObjectMap::ObjectMapIterator get_omap_iterator(const coll_t& cid, const ghobject_t &oid);
 
   int _create_collection(const coll_t& c, int bits,
@@ -810,7 +813,7 @@ private:
   bool m_filestore_sloppy_crc;
   int m_filestore_sloppy_crc_block_size;
   uint64_t m_filestore_max_alloc_hint_size;
-  long m_fs_type;
+  unsigned long m_fs_type;
 
   //Determined xattr handling based on fs type
   void set_xattr_limits_via_conf();
@@ -890,7 +893,7 @@ public:
     return filestore->cct;
   }
 
-  static FileStoreBackend *create(long f_type, FileStore *fs);
+  static FileStoreBackend *create(unsigned long f_type, FileStore *fs);
 
   virtual const char *get_name() = 0;
   virtual int detect_features() = 0;

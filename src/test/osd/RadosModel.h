@@ -500,7 +500,7 @@ public:
     redirect_objs[oid] = target;
   }
 
-  void update_object_chunk_target(const string &oid, uint64_t offset, ChunkDesc info)
+  void update_object_chunk_target(const string &oid, uint64_t offset, const ChunkDesc &info)
   {
     for (map<int, map<string,ObjectDesc> >::const_reverse_iterator i = 
 	   pool_obj_cont.rbegin();
@@ -1419,7 +1419,7 @@ public:
       }
       if (old_value.has_contents()) {
 	ContDesc to_check;
-	bufferlist::iterator p = headerbl.begin();
+	auto p = headerbl.cbegin();
 	decode(to_check, p);
 	if (to_check != old_value.most_recent()) {
 	  cerr << num << ": oid " << oid << " found incorrect object contents " << to_check
@@ -1441,7 +1441,7 @@ public:
 	    uint32_t checksum = 0;
 	    if (checksum_retvals[i] == 0) {
 	      try {
-	        auto bl_it = checksums[i].begin();
+	        auto bl_it = checksums[i].cbegin();
 	        uint32_t csum_count;
 	        decode(csum_count, bl_it);
 	        decode(checksum, bl_it);
@@ -2013,7 +2013,7 @@ public:
   ChunkReadOp(int n,
 	 RadosTestContext *context,
 	 const string &oid,
-	 string tgt_pool_name,
+	 const string &tgt_pool_name,
 	 bool balance_reads,
 	 TestOpStat *stat = 0)
     : TestOp(n, context, stat),
@@ -2171,7 +2171,7 @@ public:
 	uint32_t checksum[2] = {0};
 	if (checksum_retvals[1] == 0) {
 	  try {
-	    auto bl_it = checksums[1].begin();
+	    auto bl_it = checksums[1].cbegin();
 	    uint32_t csum_count;
 	    decode(csum_count, bl_it);
 	    decode(checksum[1], bl_it);
@@ -2747,7 +2747,7 @@ public:
       int r = comp2->get_return_value();
       if (r == 0) {
 	HitSet hitset;
-	bufferlist::iterator p = bl.begin();
+	auto p = bl.cbegin();
 	decode(hitset, p);
 	cout << num << ": got hitset of type " << hitset.get_type_name()
 	     << " size " << bl.length()

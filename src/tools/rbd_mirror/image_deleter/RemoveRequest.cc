@@ -3,7 +3,7 @@
 
 #include "tools/rbd_mirror/image_deleter/RemoveRequest.h"
 #include "include/assert.h"
-#include "common/dout.h"
+#include "common/debug.h"
 #include "common/errno.h"
 #include "common/WorkQueue.h"
 #include "cls/rbd/cls_rbd_client.h"
@@ -56,7 +56,7 @@ void RemoveRequest<I>::handle_get_snap_context(int r) {
 
   ::SnapContext snapc;
   if (r == 0) {
-    auto bl_it = m_out_bl.begin();
+    auto bl_it = m_out_bl.cbegin();
     r = librbd::cls_client::get_snapcontext_finish(&bl_it, &snapc);
   }
   if (r < 0 && r != -ENOENT) {

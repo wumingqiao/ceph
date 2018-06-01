@@ -95,6 +95,14 @@ DaemonStatePtr DaemonStateIndex::get(const DaemonKey &key)
   }
 }
 
+void DaemonStateIndex::rm(const DaemonKey &key)
+{
+  RWLock::WLocker l(lock);
+  if (all.count(key)) {
+    _erase(key);
+  }
+}
+
 void DaemonStateIndex::cull(const std::string& svc_name,
 			    const std::set<std::string>& names_exist)
 {
@@ -126,13 +134,15 @@ void DaemonPerfCounters::update(MMgrReport *report)
            << report->packed.length() << " bytes of data" << dendl;
 
   // Retrieve session state
-  MgrSessionRef session(static_cast<MgrSession*>(
-        report->get_connection()->get_priv()));
+  auto priv = report->get_connection()->get_priv();
+  auto session = static_cast<MgrSession*>(priv.get());
 
   // Load any newly declared types
   for (const auto &t : report->declare_types) {
     types.insert(std::make_pair(t.path, t));
     session->declared_types.insert(t.path);
+    instances.insert(std::pair<std::string, PerfCounterInstance>(
+                     t.path, PerfCounterInstance(t.type)));
   }
   // Remove any old types
   for (const auto &t : report->undeclare_types) {
@@ -142,7 +152,7 @@ void DaemonPerfCounters::update(MMgrReport *report)
   const auto now = ceph_clock_now();
 
   // Parse packed data according to declared set of types
-  bufferlist::iterator p = report->packed.begin();
+  auto p = report->packed.cbegin();
   DECODE_START(1, p);
   for (const auto &t_path : session->declared_types) {
     const auto &t = types.at(t_path);
@@ -154,9 +164,10 @@ void DaemonPerfCounters::update(MMgrReport *report)
     if (t.type & PERFCOUNTER_LONGRUNAVG) {
       decode(avgcount, p);
       decode(avgcount2, p);
+      instances.at(t_path).push_avg(now, val, avgcount);
+    } else {
+      instances.at(t_path).push(now, val);
     }
-    // TODO: interface for insertion of avgs
-    instances[t_path].push(now, val);
   }
   DECODE_FINISH(p);
 }
@@ -171,3 +182,8 @@ void PerfCounterInstance::push(utime_t t, uint64_t const &v)
   buffer.push_back({t, v});
 }
 
+void PerfCounterInstance::push_avg(utime_t t, uint64_t const &s,
+                                   uint64_t const &c)
+{
+  avg_buffer.push_back({t, s, c});
+}

@@ -39,7 +39,7 @@ public:
     ghobject_t hoid;
     ObjectStore::Transaction *t;
     OSTransaction(
-      coll_t cid,
+      const coll_t &cid,
       const ghobject_t &hoid,
       ObjectStore::Transaction *t)
       : cid(cid), hoid(hoid), t(t) {}
@@ -108,7 +108,7 @@ public:
       : oid(oid), snaps(snaps) {}
     object_snaps() {}
     void encode(bufferlist &bl) const;
-    void decode(bufferlist::iterator &bp);
+    void decode(bufferlist::const_iterator &bp);
   };
 
 private:
@@ -144,9 +144,7 @@ private:
     MapCacher::Transaction<std::string, bufferlist> *t);
 
   // True if hoid belongs in this mapping based on mask_bits and match
-  bool check(const hobject_t &hoid) const {
-    return hoid.match(mask_bits, match);
-  }
+  bool check(const hobject_t &hoid) const;
 
   int _remove_oid(
     const hobject_t &oid,    ///< [in] oid to remove

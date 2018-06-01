@@ -57,7 +57,7 @@ Context *EnableRequest<I>::handle_get_mirror_image(int *result) {
   ldout(m_cct, 10) << this << " " << __func__ << ": r=" << *result << dendl;
 
   if (*result == 0) {
-    bufferlist::iterator iter = m_out_bl.begin();
+    auto iter = m_out_bl.cbegin();
     *result = cls_client::mirror_image_get_finish(&iter, &m_mirror_image);
   }
 
@@ -73,7 +73,7 @@ Context *EnableRequest<I>::handle_get_mirror_image(int *result) {
   }
 
   if (*result != -ENOENT) {
-    lderr(m_cct) << "failed to retreive mirror image: " << cpp_strerror(*result)
+    lderr(m_cct) << "failed to retrieve mirror image: " << cpp_strerror(*result)
                  << dendl;
     return m_on_finish;
   }

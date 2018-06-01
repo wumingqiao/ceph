@@ -17,6 +17,7 @@
 
 #include <sys/types.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <limits.h>
 #include <time.h>
 #include <strings.h>
@@ -147,6 +148,9 @@ off_t		file_size = 0;
 off_t		biggest = 0;
 unsigned long	testcalls = 0;		/* calls to function "test" */
 
+const char* cluster_name = "ceph";      /* --cluster optional */
+const char* client_id = "admin";        /* --id optional */
+
 unsigned long	simulatedopcount = 0;	/* -b flag */
 int	closeprob = 0;			/* -c flag */
 int	debug = 0;			/* -d flag */
@@ -256,6 +260,7 @@ get_random(void)
 	return random_generator();
 }
 
+int get_features(uint64_t* features);
 void replay_imagename(char *buf, size_t len, int clones);
 
 namespace {
@@ -360,15 +365,19 @@ int create_replay_image(rados_ioctx_t ioctx, int order,
         librados::IoCtx io_ctx;
         librados::IoCtx::from_rados_ioctx_t(ioctx, io_ctx);
 
-        int r;
+        uint64_t features;
+        int r = get_features(&features);
+        if (r < 0) {
+                return r;
+        }
+
         librbd::RBD rbd;
         if (last_replay_image_name == nullptr) {
-                r = rbd.create2(io_ctx, replay_image_name, 0,
-                                RBD_FEATURES_ALL, &order);
+                r = rbd.create2(io_ctx, replay_image_name, 0, features, &order);
         } else {
                 r = rbd.clone2(io_ctx, last_replay_image_name, "snap",
-                               io_ctx, replay_image_name, RBD_FEATURES_ALL,
-                               &order, stripe_unit, stripe_count);
+                               io_ctx, replay_image_name, features, &order,
+                               stripe_unit, stripe_count);
         }
 
         if (r < 0) {
@@ -533,6 +542,27 @@ rados_ioctx_t ioctx;		/* handle for our test pool */
 struct krbd_ctx *krbd;		/* handle for libkrbd */
 #endif
 bool skip_partial_discard;	/* rbd_skip_partial_discard config value*/
+
+int get_features(uint64_t* features) {
+        char buf[1024];
+        int r = rados_conf_get(cluster, "rbd_default_features", buf,
+                               sizeof(buf));
+        if (r < 0) {
+                simple_err("Could not get rbd_default_features value", r);
+                return r;
+        }
+
+        *features = strtol(buf, NULL, 0);
+
+        if (clone_calls) {
+                *features |= RBD_FEATURE_LAYERING;
+        }
+        if (journal_replay) {
+                *features |= (RBD_FEATURE_EXCLUSIVE_LOCK |
+                              RBD_FEATURE_JOURNALING);
+        }
+        return 0;
+}
 
 /*
  * librbd/krbd rbd_operations handlers.  Given the rest of fsx.c, no
@@ -848,7 +878,12 @@ __librbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
 		return ret;
 	}
 
-	uint64_t features = RBD_FEATURES_ALL;
+        uint64_t features;
+        ret = get_features(&features);
+        if (ret < 0) {
+                return ret;
+        }
+
 	if (krbd) {
 		features &= ~(RBD_FEATURE_OBJECT_MAP     |
                               RBD_FEATURE_FAST_DIFF      |
@@ -1893,8 +1928,11 @@ create_image()
 	int r;
 	int order = 0;
 	char buf[32];
+	char client_name[256];
 
-	r = rados_create(&cluster, NULL);
+	sprintf(client_name, "client.%s", client_id);
+
+	r = rados_create2(&cluster, cluster_name, client_name, 0);
 	if (r < 0) {
 		simple_err("Could not create cluster handle", r);
 		return r;
@@ -1931,14 +1969,12 @@ create_image()
         rados_application_enable(ioctx, "rbd", 1);
 
 	if (clone_calls || journal_replay) {
-                uint64_t features = 0;
-                if (clone_calls) {
-                        features |= RBD_FEATURE_LAYERING;
+                uint64_t features;
+                r = get_features(&features);
+                if (r < 0) {
+                        goto failed_open;
                 }
-                if (journal_replay) {
-                        features |= (RBD_FEATURE_EXCLUSIVE_LOCK |
-                                     RBD_FEATURE_JOURNALING);
-                }
+
 		r = rbd_create2(ioctx, iname, file_size, features, &order);
 	} else {
 		r = rbd_create(ioctx, iname, file_size, &order);
@@ -2391,8 +2427,15 @@ docompareandwrite(unsigned offset, unsigned size)
 
 void clone_filename(char *buf, size_t len, int clones)
 {
+#if __GNUC__ && __GNUC__ >= 8
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 	snprintf(buf, len, "%s/fsx-%s-parent%d",
 		 dirpath, iname, clones);
+#if __GNUC__ && __GNUC__ >= 8
+#pragma GCC diagnostic pop
+#endif
 }
 
 void clone_imagename(char *buf, size_t len, int clones)
@@ -3003,10 +3046,20 @@ void remove_image(rados_ioctx_t ioctx, char *imagename, bool remove_snap,
 int
 main(int argc, char **argv)
 {
+	enum {
+		LONG_OPT_CLUSTER = 1000,
+		LONG_OPT_ID = 1001
+	};
+
 	int	i, style, ch, ret;
 	char	*endp;
 	char goodfile[1024];
 	char logfile[1024];
+
+	const char* optstring = "b:c:dfgh:jkl:m:no:p:qr:s:t:w:xyCD:FGHKMLN:OP:RS:UWZ";
+	const struct option longopts[] = {
+		{"cluster", 1, NULL, LONG_OPT_CLUSTER},
+		{"id", 1, NULL, LONG_OPT_ID}};
 
 	goodfile[0] = 0;
 	logfile[0] = 0;
@@ -3017,9 +3070,14 @@ main(int argc, char **argv)
 
 	setvbuf(stdout, (char *)0, _IOLBF, 0); /* line buffered stdout */
 
-	while ((ch = getopt(argc, argv, "b:c:dfgh:jkl:m:no:p:qr:s:t:w:xyCD:FGHKMLN:OP:RS:UWZ"))
-	       != EOF)
+	while ((ch = getopt_long(argc, argv, optstring, longopts, NULL)) != EOF) {
 		switch (ch) {
+		case LONG_OPT_CLUSTER:
+			cluster_name = optarg;
+			break;
+		case LONG_OPT_ID:
+			client_id = optarg;
+			break;
 		case 'b':
 			simulatedopcount = getnum(optarg, &endp);
 			if (!quiet)
@@ -3213,6 +3271,7 @@ main(int argc, char **argv)
 			usage();
 			/* NOTREACHED */
 		}
+	}
 	argc -= optind;
 	argv += optind;
 	if (argc != 2)

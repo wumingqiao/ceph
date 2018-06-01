@@ -187,7 +187,7 @@ class DefaultStrategy : public rgw::auth::Strategy,
   aplptr_t create_apl_remote(CephContext* const cct,
                              const req_state* const s,
                              acl_strategy_t&& extra_acl_strategy,
-                             const rgw::auth::RemoteApplier::AuthInfo info) const override {
+                             const rgw::auth::RemoteApplier::AuthInfo &info) const override {
     auto apl = \
       rgw::auth::add_3rdparty(store, s->account_name,
         rgw::auth::add_sysreq(cct, store, s,
@@ -278,7 +278,7 @@ public:
 
   int verify_permission() override { return 0; }
   void execute() override;
-  const string name() override { return "swift_auth_get"; }
+  const char* name() const override { return "swift_auth_get"; }
 };
 
 class RGWHandler_SWIFT_Auth : public RGWHandler_REST {

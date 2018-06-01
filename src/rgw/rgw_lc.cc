@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include <string.h>
 #include <iostream>
 #include <map>
@@ -290,7 +293,12 @@ int RGWLC::handle_multipart_expiration(RGWRados::Bucket *target, const map<strin
   int ret;
   RGWBucketInfo& bucket_info = target->get_bucket_info();
   RGWRados::Bucket::List list_op(target);
+  auto delay_ms = cct->_conf->get_val<int64_t>("rgw_lc_thread_delay");
   list_op.params.list_versions = false;
+  /* lifecycle processing does not depend on total order, so can
+   * take advantage of unorderd listing optimizations--such as
+   * operating on one shard at a time */
+  list_op.params.allow_unordered = true;
   list_op.params.ns = RGW_OBJ_NS_MULTIPART;
   list_op.params.filter = &mp_filter;
   for (auto prefix_iter = prefix_map.begin(); prefix_iter != prefix_map.end(); ++prefix_iter) {
@@ -318,13 +326,15 @@ int RGWLC::handle_multipart_expiration(RGWRados::Bucket *target, const map<strin
           RGWObjectCtx rctx(store);
           ret = abort_multipart_upload(store, cct, &rctx, bucket_info, mp_obj);
           if (ret < 0 && ret != -ERR_NO_SUCH_UPLOAD) {
-            ldout(cct, 0) << "ERROR: abort_multipart_upload failed, ret=" << ret <<dendl;
-            return ret;
+            ldout(cct, 0) << "ERROR: abort_multipart_upload failed, ret=" << ret << ", meta:" << obj_iter->key << dendl;
+          } else if (ret == -ERR_NO_SUCH_UPLOAD) {
+            ldout(cct, 5) << "ERROR: abort_multipart_upload failed, ret=" << ret << ", meta:" << obj_iter->key << dendl;
           }
           if (going_down())
             return 0;
         }
-      }
+      } /* for objs */
+      std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     } while(is_truncated);
   }
   return 0;
@@ -349,6 +359,7 @@ int RGWLC::bucket_lc_process(string& shard_id)
   vector<rgw_bucket_dir_entry> objs;
   RGWObjectCtx obj_ctx(store);
   vector<std::string> result;
+  auto delay_ms = cct->_conf->get_val<int64_t>("rgw_lc_thread_delay");
   boost::split(result, shard_id, boost::is_any_of(":"));
   string bucket_tenant = result[0];
   string bucket_name = result[1];
@@ -372,7 +383,7 @@ int RGWLC::bucket_lc_process(string& shard_id)
   if (aiter == bucket_attrs.end())
     return 0;
 
-  bufferlist::iterator iter(&aiter->second);
+  bufferlist::const_iterator iter{&aiter->second};
   try {
       config.decode(iter);
     } catch (const buffer::error& e) {
@@ -392,7 +403,11 @@ int RGWLC::bucket_lc_process(string& shard_id)
         ceph_clock_now() < ceph::real_clock::to_time_t(*prefix_iter->second.expiration_date)) {
         continue;
       }
+      /* lifecycle processing does not depend on total order, so can
+       * take advantage of unorderd listing optimizations--such as
+       * operating on one shard at a time */
       list_op.params.prefix = prefix_iter->first;
+      list_op.params.allow_unordered = true;
       do {
         objs.clear();
         list_op.params.marker = list_op.get_next_marker();
@@ -421,7 +436,7 @@ int RGWLC::bucket_lc_process(string& shard_id)
             }
             RGWObjTags dest_obj_tags;
             try {
-              auto iter = tags_bl.begin();
+              auto iter = tags_bl.cbegin();
               dest_obj_tags.decode(iter);
             } catch (buffer::error& err) {
                ldout(cct,0) << "ERROR: caught buffer::error, couldn't decode TagSet" << dendl;
@@ -466,7 +481,8 @@ int RGWLC::bucket_lc_process(string& shard_id)
             if (going_down())
               return 0;
           }
-        }
+        } /* for objs */
+	std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
       } while (is_truncated);
     }
   } else {
@@ -479,10 +495,10 @@ int RGWLC::bucket_lc_process(string& shard_id)
         continue;
       }
       if (prefix_iter != prefix_map.begin() && 
-        (prefix_iter->first.compare(0, prev(prefix_iter)->first.length(), prev(prefix_iter)->first) == 0)) {
-        list_op.next_marker = pre_marker;
+          (prefix_iter->first.compare(0, prev(prefix_iter)->first.length(), prev(prefix_iter)->first) == 0)) {
+	list_op.get_next_marker() = pre_marker;
       } else {
-        pre_marker = list_op.get_next_marker();
+	pre_marker = list_op.get_next_marker();
       }
       list_op.params.prefix = prefix_iter->first;
       rgw_bucket_dir_entry pre_obj;
@@ -518,7 +534,7 @@ int RGWLC::bucket_lc_process(string& shard_id)
               if ((obj_iter + 1)==objs.end()) {
                 if (is_truncated) {
                   //deal with it in next round because we can't judge whether this marker is the only version
-                  list_op.next_marker = obj_iter->key;
+                  list_op.get_next_marker() = obj_iter->key;
                   break;
                 }
               } else if (obj_iter->key.name.compare((obj_iter + 1)->key.name) == 0) {   //*obj_iter is delete marker and isn't the only version, do nothing.

@@ -194,7 +194,7 @@ struct DummyBlock {
     encode(d, bl);
     ENCODE_FINISH(bl);
   }
-  void decode(bufferlist::iterator &bl) {
+  void decode(bufferlist::const_iterator &bl) {
     DECODE_START(1, bl);
     decode(a, bl);
     decode(b, bl);
@@ -215,7 +215,7 @@ double buffer_encode_decode()
     bufferlist b;
     DummyBlock dummy_block;
     encode(dummy_block, b);
-    bufferlist::iterator iter = b.begin();
+    auto iter = b.cbegin();
     decode(dummy_block, iter);
   }
   uint64_t stop = Cycles::rdtsc();
@@ -308,7 +308,7 @@ double buffer_iterator()
   int sum = 0;
   uint64_t start = Cycles::rdtsc();
   for (int i = 0; i < count; i++) {
-    bufferlist::iterator it = b.begin();
+    auto it = b.cbegin();
     while (!it.end()) {
       sum += (static_cast<const char*>(it.get_current_ptr().c_str()))[it.get_remaining()-1];
       ++it;
@@ -637,11 +637,10 @@ double perf_prefetch()
   uint64_t total_ticks = 0;
   int count = 10;
   char buf[16 * 64];
-  uint64_t start, stop;
 
   for (int i = 0; i < count; i++) {
     PerfHelper::flush_cache();
-    start = Cycles::rdtsc();
+    uint64_t start = Cycles::rdtsc();
     prefetch(&buf[576], 64);
     prefetch(&buf[0],   64);
     prefetch(&buf[512], 64);
@@ -658,7 +657,7 @@ double perf_prefetch()
     prefetch(&buf[832], 64);
     prefetch(&buf[64],  64);
     prefetch(&buf[192], 64);
-    stop = Cycles::rdtsc();
+    uint64_t stop = Cycles::rdtsc();
     total_ticks += stop - start;
   }
   return Cycles::to_seconds(total_ticks) / count / 16;
@@ -1021,7 +1020,8 @@ int main(int argc, char *argv[])
   argv_to_vec(argc, (const char **)argv, args);
 
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
-			 CODE_ENVIRONMENT_UTILITY, 0);
+			 CODE_ENVIRONMENT_UTILITY,
+			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
   common_init_finish(g_ceph_context);
   Cycles::init();
 

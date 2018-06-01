@@ -197,9 +197,12 @@ Commands
   Copy the content of a src-image into the newly created dest-image.
   dest-image will have the same size, object size, and image format as src-image.
 
-:command:`create` (-s | --size *size-in-M/G/T*) [--image-format *format-id*] [--object-size *size-in-B/K/M*] [--stripe-unit *size-in-B/K/M* --stripe-count *num*] [--image-feature *feature-name*]... [--image-shared] *image-spec*
+:command:`create` (-s | --size *size-in-M/G/T*) [--image-format *format-id*] [--object-size *size-in-B/K/M*] [--stripe-unit *size-in-B/K/M* --stripe-count *num*] [--thick-provision] [--no-progress] [--image-feature *feature-name*]... [--image-shared] *image-spec*
   Will create a new rbd image. You must also specify the size via --size.  The
   --stripe-unit and --stripe-count arguments are optional, but must be used together.
+  If the --thick-provision is enabled, it will fully allocate storage for
+  the image at creation time. It will take a long time to do.
+  Note: thick provisioning requires zeroing the contents of the entire image.
 
 :command:`deep cp` (*src-image-spec* | *src-snap-spec*) *dest-image-spec*
   Deep copy the content of a src-image into the newly created dest-image.
@@ -281,6 +284,9 @@ Commands
 
 :command:`group ls` [-p | --pool *pool-name*]
   List rbd groups.
+
+:command:`group rename` *src-group-spec* *dest-group-spec*
+  Rename a group.  Note: rename across pools is not supported.
 
 :command:`group rm` *group-spec*
   Delete a group.
@@ -507,7 +513,7 @@ Commands
   This requires image format 2.
 
 :command:`snap purge` *image-spec*
-  Remove all snapshots from an image.
+  Remove all unprotected snapshots from an image.
 
 :command:`snap rename` *src-snap-spec* *dest-snap-spec*
   Rename a snapshot. Note: rename across pools and images is not supported.
@@ -657,6 +663,14 @@ Per mapping (block device) `rbd device map` options:
   discards (since 4.9).
 
 * exclusive - Disable automatic exclusive lock transitions (since 4.12).
+
+* lock_timeout=x - A timeout on waiting for the acquisition of exclusive lock
+  (since 4.17, default is 0 seconds, meaning no timeout).
+
+* notrim - Turn off discard and write zeroes offload support to avoid
+  deprovisioning a fully provisioned image (since 4.17). When enabled, discard
+  requests will fail with -EOPNOTSUPP, write zeroes requests will fall back to
+  manually zeroing.
 
 `rbd device unmap` options:
 

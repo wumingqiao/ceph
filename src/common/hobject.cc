@@ -115,7 +115,7 @@ void hobject_t::encode(bufferlist& bl) const
   ENCODE_FINISH(bl);
 }
 
-void hobject_t::decode(bufferlist::iterator& bl)
+void hobject_t::decode(bufferlist::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(4, 3, 3, bl);
   if (struct_v >= 1)
@@ -336,10 +336,14 @@ int cmp(const hobject_t& l, const hobject_t& r)
     return -1;
   if (l.nspace > r.nspace)
     return 1;
-  if (l.get_effective_key() < r.get_effective_key())
-    return -1;
-  if (l.get_effective_key() > r.get_effective_key())
-    return 1;
+  if (!(l.get_key().empty() && r.get_key().empty())) {
+    if (l.get_effective_key() < r.get_effective_key()) {
+      return -1;
+    }
+    if (l.get_effective_key() > r.get_effective_key()) {
+      return 1;
+    }
+  }
   if (l.oid < r.oid)
     return -1;
   if (l.oid > r.oid)
@@ -413,7 +417,7 @@ size_t ghobject_t::encoded_size() const
   return r;
 }
 
-void ghobject_t::decode(bufferlist::iterator& bl)
+void ghobject_t::decode(bufferlist::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(6, 3, 3, bl);
   if (struct_v >= 1)

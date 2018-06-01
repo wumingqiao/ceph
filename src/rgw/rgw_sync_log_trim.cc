@@ -52,7 +52,7 @@ WRITE_RAW_ENCODER(TrimNotifyType);
 struct TrimNotifyHandler {
   virtual ~TrimNotifyHandler() = default;
 
-  virtual void handle(bufferlist::iterator& input, bufferlist& output) = 0;
+  virtual void handle(bufferlist::const_iterator& input, bufferlist& output) = 0;
 };
 
 /// api to share the bucket trim counters between gateways in the same zone.
@@ -69,7 +69,7 @@ struct TrimCounters {
       : bucket(bucket), count(count) {}
 
     void encode(bufferlist& bl) const;
-    void decode(bufferlist::iterator& p);
+    void decode(bufferlist::const_iterator& p);
   };
   using Vector = std::vector<BucketCounter>;
 
@@ -78,7 +78,7 @@ struct TrimCounters {
     uint16_t max_buckets; //< maximum number of bucket counters to return
 
     void encode(bufferlist& bl) const;
-    void decode(bufferlist::iterator& p);
+    void decode(bufferlist::const_iterator& p);
   };
 
   /// return the current bucket trim counters
@@ -86,7 +86,7 @@ struct TrimCounters {
     Vector bucket_counters;
 
     void encode(bufferlist& bl) const;
-    void decode(bufferlist::iterator& p);
+    void decode(bufferlist::const_iterator& p);
   };
 
   /// server interface to query the hottest buckets
@@ -101,9 +101,9 @@ struct TrimCounters {
   class Handler : public TrimNotifyHandler {
     Server *const server;
    public:
-    Handler(Server *server) : server(server) {}
+    explicit Handler(Server *server) : server(server) {}
 
-    void handle(bufferlist::iterator& input, bufferlist& output) override;
+    void handle(bufferlist::const_iterator& input, bufferlist& output) override;
   };
 };
 std::ostream& operator<<(std::ostream& out, const TrimCounters::BucketCounter& rhs)
@@ -118,7 +118,7 @@ void TrimCounters::BucketCounter::encode(bufferlist& bl) const
   encode(bucket, bl);
   encode(count, bl);
 }
-void TrimCounters::BucketCounter::decode(bufferlist::iterator& p)
+void TrimCounters::BucketCounter::decode(bufferlist::const_iterator& p)
 {
   using ceph::decode;
   decode(bucket, p);
@@ -132,7 +132,7 @@ void TrimCounters::Request::encode(bufferlist& bl) const
   encode(max_buckets, bl);
   ENCODE_FINISH(bl);
 }
-void TrimCounters::Request::decode(bufferlist::iterator& p)
+void TrimCounters::Request::decode(bufferlist::const_iterator& p)
 {
   DECODE_START(1, p);
   decode(max_buckets, p);
@@ -146,7 +146,7 @@ void TrimCounters::Response::encode(bufferlist& bl) const
   encode(bucket_counters, bl);
   ENCODE_FINISH(bl);
 }
-void TrimCounters::Response::decode(bufferlist::iterator& p)
+void TrimCounters::Response::decode(bufferlist::const_iterator& p)
 {
   DECODE_START(1, p);
   decode(bucket_counters, p);
@@ -154,7 +154,7 @@ void TrimCounters::Response::decode(bufferlist::iterator& p)
 }
 WRITE_CLASS_ENCODER(TrimCounters::Response);
 
-void TrimCounters::Handler::handle(bufferlist::iterator& input,
+void TrimCounters::Handler::handle(bufferlist::const_iterator& input,
                                    bufferlist& output)
 {
   Request request;
@@ -171,11 +171,11 @@ void TrimCounters::Handler::handle(bufferlist::iterator& input,
 struct TrimComplete {
   struct Request {
     void encode(bufferlist& bl) const;
-    void decode(bufferlist::iterator& p);
+    void decode(bufferlist::const_iterator& p);
   };
   struct Response {
     void encode(bufferlist& bl) const;
-    void decode(bufferlist::iterator& p);
+    void decode(bufferlist::const_iterator& p);
   };
 
   /// server interface to reset bucket counters
@@ -185,9 +185,9 @@ struct TrimComplete {
   class Handler : public TrimNotifyHandler {
     Server *const server;
    public:
-    Handler(Server *server) : server(server) {}
+    explicit Handler(Server *server) : server(server) {}
 
-    void handle(bufferlist::iterator& input, bufferlist& output) override;
+    void handle(bufferlist::const_iterator& input, bufferlist& output) override;
   };
 };
 
@@ -196,7 +196,7 @@ void TrimComplete::Request::encode(bufferlist& bl) const
   ENCODE_START(1, 1, bl);
   ENCODE_FINISH(bl);
 }
-void TrimComplete::Request::decode(bufferlist::iterator& p)
+void TrimComplete::Request::decode(bufferlist::const_iterator& p)
 {
   DECODE_START(1, p);
   DECODE_FINISH(p);
@@ -208,14 +208,14 @@ void TrimComplete::Response::encode(bufferlist& bl) const
   ENCODE_START(1, 1, bl);
   ENCODE_FINISH(bl);
 }
-void TrimComplete::Response::decode(bufferlist::iterator& p)
+void TrimComplete::Response::decode(bufferlist::const_iterator& p)
 {
   DECODE_START(1, p);
   DECODE_FINISH(p);
 }
 WRITE_CLASS_ENCODER(TrimComplete::Response);
 
-void TrimComplete::Handler::handle(bufferlist::iterator& input,
+void TrimComplete::Handler::handle(bufferlist::const_iterator& input,
                                    bufferlist& output)
 {
   Request request;
@@ -306,7 +306,7 @@ class BucketTrimWatcher : public librados::WatchCtx2 {
     }
     bufferlist reply;
     try {
-      auto p = bl.begin();
+      auto p = bl.cbegin();
       TrimNotifyType type;
       decode(type, p);
 
@@ -545,14 +545,14 @@ int accumulate_peer_counters(bufferlist& bl, BucketChangeCounter& counter)
 
   try {
     // decode notify responses
-    auto p = bl.begin();
+    auto p = bl.cbegin();
     std::map<std::pair<uint64_t, uint64_t>, bufferlist> replies;
     std::set<std::pair<uint64_t, uint64_t>> timeouts;
     decode(replies, p);
     decode(timeouts, p);
 
     for (auto& peer : replies) {
-      auto q = peer.second.begin();
+      auto q = peer.second.cbegin();
       TrimCounters::Response response;
       decode(response, q);
       for (const auto& b : response.bucket_counters) {
@@ -732,7 +732,7 @@ class BucketTrimCR : public RGWCoroutine {
       observer(observer), obj(obj), counter(config.counter_size)
   {}
 
-  int operate();
+  int operate() override;
 };
 
 const std::string BucketTrimCR::section{"bucket.instance"};
@@ -889,7 +889,7 @@ class BucketTrimPollCR : public RGWCoroutine {
       cookie(RGWSimpleRadosLockCR::gen_random_cookie(cct))
   {}
 
-  int operate();
+  int operate() override;
 };
 
 int BucketTrimPollCR::operate()
@@ -897,7 +897,7 @@ int BucketTrimPollCR::operate()
   reenter(this) {
     for (;;) {
       set_status("sleeping");
-      wait(utime_t{config.trim_interval_sec, 0});
+      wait(utime_t{static_cast<time_t>(config.trim_interval_sec), 0});
 
       // prevent others from trimming for our entire wait interval
       set_status("acquiring trim lock");

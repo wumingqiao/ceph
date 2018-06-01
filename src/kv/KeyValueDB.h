@@ -52,7 +52,7 @@ public:
       const std::string &prefix,      ///< [in] prefix, or CF name
       bufferlist& to_set_bl           ///< [in] encoded key/values to set
       ) {
-      bufferlist::iterator p = to_set_bl.begin();
+      auto p = std::cbegin(to_set_bl);
       uint32_t num;
       decode(num, p);
       while (num--) {
@@ -83,7 +83,7 @@ public:
       const std::string &prefix,     ///< [in] Prefix or CF to search for
       bufferlist &keys_bl            ///< [in] Keys to remove
     ) {
-      bufferlist::iterator p = keys_bl.begin();
+      auto p = std::cbegin(keys_bl);
       uint32_t num;
       decode(num, p);
       while (num--) {
@@ -151,6 +151,7 @@ public:
   /// create a new instance
   static KeyValueDB *create(CephContext *cct, const std::string& type,
 			    const std::string& dir,
+			    map<std::string,std::string> options = {},
 			    void *p = NULL);
 
   /// test whether we can successfully initialize; may have side effects (e.g., create)
@@ -362,6 +363,9 @@ public:
 
   /// compact the underlying store
   virtual void compact() {}
+
+  /// compact the underlying store in async mode
+  virtual void compact_async() {}
 
   /// compact db for all keys with a given prefix
   virtual void compact_prefix(const std::string& prefix) {}
